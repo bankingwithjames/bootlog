@@ -10,6 +10,7 @@ import {
   Clock,
   Wallet,
   CreditCard,
+  Plus,
   Pencil,
   Loader2,
   X,
@@ -94,7 +95,14 @@ function deriveStatus(b: Boot): DerivedStatus {
   return { key: "unpaid", ...STATUS.unpaid };
 }
 
-type PaidCarLite = { licensePlate: string };
+type PaidCarLite = {
+  id: string;
+  makeModel: string;
+  color: string;
+  licensePlate: string;
+  paidAt: string;
+  source?: "stripe" | "manual";
+};
 type ChipFilter = "all" | "unpaid" | "booted" | "paid";
 
 export function FieldInventory({
@@ -182,6 +190,27 @@ export function FieldInventory({
     });
   }, [rows, search, chip, paidPlates]);
 
+  // Paid vehicles from /api/paid-cars (Stripe + manual entries), newest-first,
+  // filtered by the same search box. This is the list the Stripe API populates
+  // — shown when the "Paid" chip is active so attendants can see paid cars even
+  // before a physical boot/settlement exists.
+  const displayPaidCars = useMemo(() => {
+    const q = normalizePlate(search);
+    const qText = search.trim().toUpperCase();
+    return [...paidCars]
+      .filter((c) => {
+        if (!q && !qText) return true;
+        const plateMatch = normalizePlate(c.licensePlate).includes(q);
+        const textMatch = (c.makeModel ?? "").toUpperCase().includes(qText);
+        return plateMatch || textMatch;
+      })
+      .sort((a, b) => {
+        const ta = a.paidAt ? new Date(a.paidAt).getTime() : 0;
+        const tb = b.paidAt ? new Date(b.paidAt).getTime() : 0;
+        return tb - ta;
+      });
+  }, [paidCars, search]);
+
   // Group filtered rows into the two council-approved sections: vehicles that
   // still need attention (booted/unpaid) and everything resolved (paid/
   // released). Preserves the newest-first order within each group.
@@ -249,9 +278,14 @@ export function FieldInventory({
     },
   });
 
-  const headerCount = hasFilter
-    ? `${filtered.length} result${filtered.length === 1 ? "" : "s"}`
-    : `${todayBoots.length} vehicle${todayBoots.length === 1 ? "" : "s"}`;
+  // Header count reflects what's actually on screen. The Paid chip shows the
+  // paid-cars list, so its count is displayPaidCars; otherwise it's boots.
+  const headerCount =
+    chip === "paid"
+      ? `${displayPaidCars.length} paid`
+      : hasFilter
+        ? `${filtered.length} result${filtered.length === 1 ? "" : "s"}`
+        : `${todayBoots.length} vehicle${todayBoots.length === 1 ? "" : "s"}`;
 
   return (
     <div data-testid="field-inventory">
@@ -338,15 +372,36 @@ export function FieldInventory({
             testid="chip-inventory-booted"
           />
           <Chip
-            label={`Paid · ${paidStatusCount}`}
+            label={`Paid · ${paidCars.length}`}
             active={chip === "paid"}
             onClick={() => setChip("paid")}
             testid="chip-inventory-paid"
           />
         </div>
 
-        {/* List or empty state */}
-        {filtered.length === 0 ? (
+        {/* List or empty state.
+            • "Paid" chip  -> the paid-vehicles list straight from /api/paid-cars
+              (Stripe + manual). This is what the Stripe integration populates.
+            • "All" chip   -> booted rows grouped by attention/resolved, PLUS a
+              "Paid vehicles" section listing the paid cars from the API.
+            • unpaid/booted-> booted rows only (paid cars not relevant). */}
+        {chip === "paid" ? (
+          displayPaidCars.length === 0 ? (
+            <PaidEmptyState
+              hasFilter={hasFilter}
+              onClear={clearFilters}
+            />
+          ) : (
+            <div className="flex flex-col gap-4" data-testid="inventory-list">
+              <Group title={`Paid vehicles · ${displayPaidCars.length}`}>
+                {displayPaidCars.map((c) => (
+                  <PaidCarRow key={c.id} car={c} />
+                ))}
+              </Group>
+            </div>
+          )
+        ) : filtered.length === 0 &&
+          !(chip === "all" && displayPaidCars.length > 0) ? (
           <EmptyState
             chip={chip}
             hasFilter={hasFilter}
@@ -368,7 +423,7 @@ export function FieldInventory({
               </Group>
             )}
             {grouped.resolved.length > 0 && (
-              <Group title="Paid / Resolved today">
+              <Group title="Booted · Resolved today">
                 {grouped.resolved.map(({ boot, status }) => (
                   <InventoryRow
                     key={boot.id}
@@ -377,6 +432,15 @@ export function FieldInventory({
                     canSeeFinancials={canSeeFinancials}
                     onClick={() => setOpenBoot(boot)}
                   />
+                ))}
+              </Group>
+            )}
+            {/* Paid vehicles from the API — shown in the "All" view so the list
+                of paid (Stripe/manual) cars is always visible alongside boots. */}
+            {chip === "all" && displayPaidCars.length > 0 && (
+              <Group title={`Paid vehicles · ${displayPaidCars.length}`}>
+                {displayPaidCars.map((c) => (
+                  <PaidCarRow key={c.id} car={c} />
                 ))}
               </Group>
             )}
@@ -491,6 +555,126 @@ function InventoryRow({
         </span>
       </span>
     </button>
+  );
+}
+
+// Row for a paid vehicle pulled from /api/paid-cars (Stripe or manual). Uses the
+// same FIELD tokens + mono plate chip as InventoryRow, with a source badge
+// (Stripe / Manual) and the paid time. Non-interactive (no detail sheet) — these
+// are payment records, not booted vehicles with quick actions.
+function PaidCarRow({ car }: { car: PaidCarLite }) {
+  const isManual = car.source === "manual";
+  const meta = [car.color].filter(Boolean).join(" · ");
+  let time = "";
+  try {
+    time = car.paidAt ? format(parseISO(car.paidAt), "h:mm a") : "";
+  } catch {
+    time = "";
+  }
+  return (
+    <div
+      className="flex w-full items-center gap-[11px] px-[13px] py-[13px] text-left"
+      style={{
+        borderLeft: `3px solid ${STATUS.paid.color}`,
+        borderBottom: `1px solid ${FIELD.line}`,
+      }}
+      data-testid={`row-paid-${car.id}`}
+    >
+      <span
+        className="min-w-[80px] rounded-md px-2 py-1.5 text-center text-[13.5px] font-bold tracking-[0.05em] text-white"
+        style={{
+          fontFamily: FIELD_MONO,
+          background: "#1a1d24",
+          border: "1px solid #333",
+        }}
+        data-testid={`plate-paid-${car.id}`}
+      >
+        {car.licensePlate || "—"}
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block text-[13px] font-semibold" style={{ color: FIELD.ink }}>
+          {car.makeModel || "—"}
+        </span>
+        {meta && (
+          <span className="mt-0.5 block text-[11px]" style={{ color: FIELD.ink3 }}>
+            {meta}
+          </span>
+        )}
+      </span>
+      <span className="shrink-0 text-right">
+        <span
+          className="inline-flex items-center gap-1 rounded-full px-2 py-[3px] text-[10px] font-bold uppercase tracking-[0.02em]"
+          style={
+            isManual
+              ? { background: FIELD.accentSoft, color: FIELD.accentInk }
+              : { background: STATUS.paid.fill, color: STATUS.paid.color }
+          }
+          data-testid={`source-paid-${car.id}`}
+        >
+          {isManual ? (
+            <Plus className="h-3 w-3" />
+          ) : (
+            <CreditCard className="h-3 w-3" />
+          )}
+          {isManual ? "Manual" : "Stripe"}
+        </span>
+        {time && (
+          <span
+            className="mt-[5px] block text-[12px] font-semibold"
+            style={{ fontFamily: FIELD_MONO, color: FIELD.ink2 }}
+          >
+            {time}
+          </span>
+        )}
+      </span>
+    </div>
+  );
+}
+
+// Empty state specific to the Paid chip / paid-vehicles list.
+function PaidEmptyState({
+  hasFilter,
+  onClear,
+}: {
+  hasFilter: boolean;
+  onClear: () => void;
+}) {
+  return (
+    <div
+      className="flex flex-col items-center gap-3 rounded-[0.875rem] px-6 py-12 text-center"
+      style={{ background: "#fff", border: `1px solid ${FIELD.line}` }}
+      data-testid="paid-empty"
+    >
+      <div
+        className="flex h-14 w-14 items-center justify-center rounded-full"
+        style={{ background: FIELD.fieldBg }}
+      >
+        <CreditCard className="h-7 w-7" style={{ color: FIELD.ink3 }} />
+      </div>
+      <div className="text-[15px] font-bold" style={{ color: FIELD.ink }}>
+        No paid vehicles yet
+      </div>
+      <p className="max-w-[16rem] text-[13px]" style={{ color: FIELD.ink3 }}>
+        {hasFilter
+          ? "No paid vehicles match your search right now."
+          : "Paid vehicles from Stripe and manual entries will appear here as payments come in."}
+      </p>
+      {hasFilter && (
+        <button
+          type="button"
+          onClick={onClear}
+          className="mt-1 rounded-[0.875rem] px-5 py-2.5 text-[13px] font-bold"
+          style={{
+            background: FIELD.accentSoft,
+            color: FIELD.accentInk,
+            border: "1px solid rgba(31,111,235,0.22)",
+          }}
+          data-testid="button-paid-clear-filters"
+        >
+          Clear search
+        </button>
+      )}
+    </div>
   );
 }
 

@@ -14,11 +14,18 @@ import { FieldShift } from "./FieldShift";
 import { FieldAddVehicle } from "./FieldAddVehicle";
 import { FieldInventory } from "./FieldInventory";
 import { FieldRequestBoot } from "./FieldRequestBoot";
+import { FieldSearch } from "./FieldSearch";
 
-// Minimal shape of a paid car (from /api/paid-cars). Field Mode only needs the
-// plate for cross-reference and counting; full type lives in home.tsx.
+// Shape of a paid car (from /api/paid-cars). Mirrors the full PaidCar type in
+// home.tsx — Field Mode now renders these rows in the Inventory + Search tabs
+// (not just plate cross-reference / counting).
 type PaidCarLite = {
+  id: string;
+  makeModel: string;
+  color: string;
   licensePlate: string;
+  paidAt: string;
+  source?: "stripe" | "manual";
 };
 
 // Normalize a plate for matching: uppercase, strip non-alphanumerics. Mirrors
@@ -688,9 +695,17 @@ export function FieldMode({
           onBack={() => setView("home")}
         />
       )}
+      {view === "search" && (
+        <FieldSearch
+          paidCars={paidCars}
+          assignedLot={assignedLot}
+          onBack={() => setView("home")}
+        />
+      )}
       {view !== "home" &&
         view !== "shift" &&
         view !== "inventory" &&
+        view !== "search" &&
         view !== "add" &&
         view !== "request" && (
           <FieldStub view={view} onBack={() => setView("home")} />

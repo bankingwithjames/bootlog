@@ -69,7 +69,7 @@ export default function ChangePassword() {
       await changePassword(values.currentPassword, values.newPassword);
       toast({
         title: "Password updated",
-        description: "You're all set. Welcome to BootLog.",
+        description: "You're all set. Welcome to Daily Vehicle Inventory.",
       });
       // On success the user object updates (mustChangePassword=false) and the
       // app swaps to the dashboard automatically.

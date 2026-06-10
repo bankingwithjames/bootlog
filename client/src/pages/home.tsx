@@ -12,6 +12,7 @@ import {
   Camera,
   X,
   ImagePlus,
+  Search,
   Moon,
   Sun,
   ParkingMeter,
@@ -258,7 +259,7 @@ function Logo() {
         />
       </span>
       <div className="leading-tight">
-        <span className="block text-base font-bold tracking-tight">BootLog - Daily Vehicle Inventory</span>
+        <span className="block text-base font-bold tracking-tight">Daily Vehicle Inventory</span>
         <span className="block text-xs text-muted-foreground">
           Millennialz Parking, LLC
         </span>
@@ -587,6 +588,25 @@ export default function Home() {
       ),
     [boots, filterDate],
   );
+
+  // Quick-search by license plate. Available to all users; filters the
+  // respective list (Booted / Paid Cars) live as you type.
+  const [bootedSearch, setBootedSearch] = useState("");
+  const [paidSearch, setPaidSearch] = useState("");
+  const displayBoots = useMemo(() => {
+    const q = normalizePlate(bootedSearch);
+    if (!q) return filteredBoots;
+    return filteredBoots.filter((b) =>
+      normalizePlate(b.licensePlate).includes(q),
+    );
+  }, [filteredBoots, bootedSearch]);
+  const displayPaidCars = useMemo(() => {
+    const q = normalizePlate(paidSearch);
+    if (!q) return paidCars;
+    return paidCars.filter((c) =>
+      normalizePlate(c.licensePlate ?? "").includes(q),
+    );
+  }, [paidCars, paidSearch]);
 
   // Set of paid plates (normalized) for cross-reference.
   const paidPlateSet = useMemo(
@@ -1024,11 +1044,12 @@ export default function Home() {
                   <TabsList>
                     <TabsTrigger value="booted" data-testid="tab-booted">
                       <Car className="mr-1.5 h-4 w-4" />
-                      Booted ({filteredBoots.length})
+                      {/* Count shown to admins only; staff see a clean label. */}
+                      Booted{isAdmin ? ` (${filteredBoots.length})` : ""}
                     </TabsTrigger>
                     <TabsTrigger value="paid" data-testid="tab-paid">
                       <CreditCard className="mr-1.5 h-4 w-4" />
-                      Paid Cars ({paidLoading ? "…" : paidCars.length})
+                      Paid Cars{isAdmin ? ` (${paidLoading ? "…" : paidCars.length})` : ""}
                     </TabsTrigger>
                   </TabsList>
                   <span className="text-sm text-muted-foreground">{filterLabel}</span>
@@ -1066,6 +1087,16 @@ export default function Home() {
                     </div>
                   )}
 
+                  {filteredBoots.length > 0 && (
+                    <div className="mb-3">
+                      <PlateSearch
+                        value={bootedSearch}
+                        onChange={setBootedSearch}
+                        testid="input-search-booted"
+                      />
+                    </div>
+                  )}
+
                   {isLoading ? (
                     <TableSkeleton />
                   ) : filteredBoots.length === 0 ? (
@@ -1074,10 +1105,16 @@ export default function Home() {
                       title={`No boots logged for ${filterLabel}`}
                       subtitle="Add a vehicle using the form, or pick a different date."
                     />
+                  ) : displayBoots.length === 0 ? (
+                    <EmptyState
+                      icon={<Search className="h-8 w-8 text-muted-foreground/50" />}
+                      title={`No plates match “${bootedSearch}”`}
+                      subtitle="Try a different plate or clear the search."
+                    />
                   ) : (
-                    <div className="overflow-x-auto">
+                    <div className="max-h-[60vh] overflow-auto rounded-md border">
                       <Table>
-                        <TableHeader>
+                        <TableHeader className="sticky top-0 z-10 bg-card">
                           <TableRow>
                             <TableHead>License Plate</TableHead>
                             <TableHead>Make &amp; Model</TableHead>
@@ -1090,7 +1127,7 @@ export default function Home() {
                           </TableRow>
                         </TableHeader>
                         <TableBody>
-                          {filteredBoots.map((b) => {
+                          {displayBoots.map((b) => {
                             const matched = paidPlateSet.has(normalizePlate(b.licensePlate));
                             const status = (b.status ?? "booted") as BootStatus;
                             return (
@@ -1373,9 +1410,24 @@ export default function Home() {
                     />
                   ) : (
                     <>
+                      <div className="mb-3">
+                        <PlateSearch
+                          value={paidSearch}
+                          onChange={setPaidSearch}
+                          testid="input-search-paid"
+                        />
+                      </div>
+                      {displayPaidCars.length === 0 ? (
+                        <EmptyState
+                          icon={<Search className="h-8 w-8 text-muted-foreground/50" />}
+                          title={`No plates match “${paidSearch}”`}
+                          subtitle="Try a different plate or clear the search."
+                        />
+                      ) : (
+                      <>
                       {/* Mobile: stacked cards — all info visible, no horizontal scroll */}
-                      <div className="space-y-3 sm:hidden">
-                        {paidCars.map((c) => {
+                      <div className="max-h-[60vh] space-y-3 overflow-auto sm:hidden">
+                        {displayPaidCars.map((c) => {
                           const sourceBadge =
                             c.source === "manual" ? (
                               <Badge
@@ -1424,9 +1476,9 @@ export default function Home() {
                         })}
                       </div>
                       {/* Desktop: full table */}
-                      <div className="hidden sm:block">
+                      <div className="hidden max-h-[60vh] overflow-auto rounded-md border sm:block">
                         <Table>
-                          <TableHeader>
+                          <TableHeader className="sticky top-0 z-10 bg-card">
                             <TableRow>
                               <TableHead>License Plate</TableHead>
                               <TableHead>Make / Model</TableHead>
@@ -1436,7 +1488,7 @@ export default function Home() {
                             </TableRow>
                           </TableHeader>
                           <TableBody>
-                            {paidCars.map((c) => (
+                            {displayPaidCars.map((c) => (
                               <TableRow key={c.id} data-testid={`row-paid-desktop-${c.id}`}>
                                 <TableCell className="font-mono font-semibold uppercase">
                                   {c.licensePlate || "—"}
@@ -1470,6 +1522,8 @@ export default function Home() {
                           </TableBody>
                         </Table>
                       </div>
+                      </>
+                      )}
                     </>
                   )}
                 </TabsContent>
@@ -1593,6 +1647,48 @@ export default function Home() {
 // Capture/upload up to MAX_BOOT_PHOTOS images on the Place a Boot form.
 // Images are compressed client-side to JPEG data URLs. The hidden file input
 // uses `capture` so phones can open the camera directly (or pick from library).
+// Quick-search input for filtering a table by license plate. Available to
+// every role as a default feature; purely client-side over already-loaded rows.
+function PlateSearch({
+  value,
+  onChange,
+  testid,
+  placeholder = "Quick search by license plate…",
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  testid?: string;
+  placeholder?: string;
+}) {
+  return (
+    <div className="relative w-full sm:max-w-xs">
+      <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+      <Input
+        type="search"
+        inputMode="search"
+        autoComplete="off"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        aria-label="Search by license plate"
+        className="pl-8 pr-8 uppercase"
+        data-testid={testid}
+      />
+      {value && (
+        <button
+          type="button"
+          onClick={() => onChange("")}
+          aria-label="Clear search"
+          className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+          data-testid={testid ? `${testid}-clear` : undefined}
+        >
+          <X className="h-4 w-4" />
+        </button>
+      )}
+    </div>
+  );
+}
+
 function PhotoUploadField({
   value,
   onChange,
@@ -1806,10 +1902,16 @@ function EnforcementView({
     return c;
   }, [sorted]);
 
-  const rows =
-    filter === "all"
-      ? sorted
-      : sorted.filter((b) => (b.status as BootStatus) === filter);
+  const [search, setSearch] = useState("");
+  const rows = useMemo(() => {
+    const byStatus =
+      filter === "all"
+        ? sorted
+        : sorted.filter((b) => (b.status as BootStatus) === filter);
+    const q = normalizePlate(search);
+    if (!q) return byStatus;
+    return byStatus.filter((b) => normalizePlate(b.licensePlate).includes(q));
+  }, [sorted, filter, search]);
 
   const outstanding = sorted
     .filter((b) => (b.status as BootStatus) === "booted")
@@ -1875,22 +1977,43 @@ function EnforcementView({
         </Tabs>
       </CardHeader>
       <CardContent>
+        {!loading && sorted.length > 0 && (
+          <div className="mb-3">
+            <PlateSearch
+              value={search}
+              onChange={setSearch}
+              testid="input-search-enforce"
+            />
+          </div>
+        )}
         {loading ? (
           <TableSkeleton />
         ) : rows.length === 0 ? (
           <EmptyState
-            icon={<Gavel className="h-8 w-8 text-muted-foreground/50" />}
+            icon={
+              search ? (
+                <Search className="h-8 w-8 text-muted-foreground/50" />
+              ) : (
+                <Gavel className="h-8 w-8 text-muted-foreground/50" />
+              )
+            }
             title={
-              filter === "booted"
+              search
+                ? `No plates match “${search}”`
+                : filter === "booted"
                 ? "No active boots"
                 : `No ${filter === "all" ? "" : STATUS_META[filter as BootStatus].label.toLowerCase() + " "}boots`
             }
-            subtitle="Place a boot from the Daily view to start enforcement."
+            subtitle={
+              search
+                ? "Try a different plate or clear the search."
+                : "Place a boot from the Daily view to start enforcement."
+            }
           />
         ) : (
-          <div className="overflow-x-auto">
+          <div className="max-h-[60vh] overflow-auto rounded-md border">
             <Table>
-              <TableHeader>
+              <TableHeader className="sticky top-0 z-10 bg-card">
                 <TableRow>
                   <TableHead>Plate</TableHead>
                   <TableHead>Vehicle</TableHead>
@@ -2155,7 +2278,7 @@ function HistoryView({
         ) : (
           <div>
             {/* Mobile: stacked cards — every metric visible, no horizontal scroll */}
-            <div className="space-y-3 sm:hidden">
+            <div className="max-h-[60vh] space-y-3 overflow-auto sm:hidden">
               {days.map((d) => (
                 <button
                   key={d.day}
@@ -2222,9 +2345,9 @@ function HistoryView({
               ))}
             </div>
             {/* Desktop: full table */}
-            <div className="hidden sm:block">
+            <div className="hidden max-h-[60vh] overflow-auto rounded-md border sm:block">
             <Table>
-              <TableHeader>
+              <TableHeader className="sticky top-0 z-10 bg-card">
                 <TableRow>
                   <TableHead>Date</TableHead>
                   <TableHead className="text-right">Booted</TableHead>
@@ -2675,9 +2798,9 @@ function RequestsView({
                   <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                     Resolved ({resolved.length})
                   </p>
-                  <div className="overflow-x-auto">
+                  <div className="max-h-[60vh] overflow-auto rounded-md border">
                     <Table>
-                      <TableHeader>
+                      <TableHeader className="sticky top-0 z-10 bg-card">
                         <TableRow>
                           <TableHead>Plate</TableHead>
                           <TableHead>Vehicle</TableHead>
@@ -3221,9 +3344,9 @@ function UsersView({
         {loading ? (
           <TableSkeleton />
         ) : (
-          <div className="overflow-x-auto">
+          <div className="max-h-[60vh] overflow-auto rounded-md border">
             <Table>
-              <TableHeader>
+              <TableHeader className="sticky top-0 z-10 bg-card">
                 <TableRow>
                   <TableHead>Name</TableHead>
                   <TableHead>Username</TableHead>

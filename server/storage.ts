@@ -18,6 +18,7 @@ import type {
   LocationWithStaff,
   InsertLocation,
   UpdateLocationInput,
+  Shift,
 } from "@shared/schema";
 import { supabase } from "./supabase";
 import { hashPassword } from "./auth";
@@ -93,8 +94,28 @@ function rowToLocation(row: any): Location {
     address: row.address ?? "",
     color: row.color ?? "#378ADD",
     active: Boolean(row.active),
+    latitude: row.latitude ?? null,
+    longitude: row.longitude ?? null,
+    geofenceRadius: row.geofence_radius ?? 150,
     createdAt: row.created_at,
   } as Location;
+}
+
+function rowToShift(row: any): Shift {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    userName: row.user_name ?? "",
+    locationId: row.location_id,
+    locationName: row.location_name ?? "",
+    checkInAt: row.check_in_at,
+    checkOutAt: row.check_out_at ?? null,
+    checkInLat: row.check_in_lat ?? null,
+    checkInLng: row.check_in_lng ?? null,
+    checkOutLat: row.check_out_lat ?? null,
+    checkOutLng: row.check_out_lng ?? null,
+    geofenceVerified: Boolean(row.geofence_verified),
+  } as Shift;
 }
 
 function rowToRequest(row: any): BootRequest {
@@ -178,9 +199,32 @@ export interface IStorage {
     id: number,
     patch: UpdateLocationInput,
   ): Promise<LocationWithStaff | undefined>;
+  // Auto-detected geofence center for a location (geocoded from its address).
+  setLocationGeofenceCenter(
+    id: number,
+    latitude: number,
+    longitude: number,
+  ): Promise<Location | undefined>;
   // Staff<->location assignments
   getLocationIdsForUser(userId: number): Promise<number[]>;
   setStaffForLocation(locationId: number, staffIds: number[]): Promise<void>;
+  // Shifts (geofenced check-in / check-out)
+  getActiveShiftForUser(userId: number): Promise<Shift | undefined>;
+  createShift(input: {
+    userId: number;
+    userName: string;
+    locationId: number;
+    locationName: string;
+    checkInLat: number;
+    checkInLng: number;
+    geofenceVerified: boolean;
+  }): Promise<Shift>;
+  closeShift(
+    id: number,
+    checkOutLat: number | null,
+    checkOutLng: number | null,
+  ): Promise<Shift | undefined>;
+  getShiftById(id: number): Promise<Shift | undefined>;
   // Boot requests
   getBootRequests(): Promise<BootRequest[]>;
   getBootRequest(id: number): Promise<BootRequest | undefined>;
@@ -538,6 +582,8 @@ export class DatabaseStorage implements IStorage {
     if (patch.address !== undefined) set.address = patch.address;
     if (patch.color !== undefined) set.color = patch.color;
     if (patch.active !== undefined) set.active = patch.active;
+    if (patch.geofenceRadius !== undefined)
+      set.geofence_radius = patch.geofenceRadius;
     let row: any;
     if (Object.keys(set).length > 0) {
       const rows = check(
@@ -598,6 +644,104 @@ export class DatabaseStorage implements IStorage {
         .select("id"),
       "setStaffForLocation/insert",
     );
+  }
+
+  // Persist the geocoded geofence center for a location (filled lazily the
+  // first time a shift check-in needs it, then reused).
+  async setLocationGeofenceCenter(
+    id: number,
+    latitude: number,
+    longitude: number,
+  ): Promise<Location | undefined> {
+    const rows = check(
+      await supabase
+        .from("locations")
+        .update({ latitude, longitude })
+        .eq("id", id)
+        .select("*"),
+      "setLocationGeofenceCenter",
+    );
+    const row = (rows ?? [])[0];
+    return row ? rowToLocation(row) : undefined;
+  }
+
+  // ---- Shifts ----
+  // The single open shift for a user (checkOutAt is null), if any. There is at
+  // most one because check-in refuses to open a second while one is open.
+  async getActiveShiftForUser(userId: number): Promise<Shift | undefined> {
+    const rows = check(
+      await supabase
+        .from("shifts")
+        .select("*")
+        .eq("user_id", userId)
+        .is("check_out_at", null)
+        .order("check_in_at", { ascending: false })
+        .limit(1),
+      "getActiveShiftForUser",
+    );
+    const row = (rows ?? [])[0];
+    return row ? rowToShift(row) : undefined;
+  }
+
+  async getShiftById(id: number): Promise<Shift | undefined> {
+    const rows = check(
+      await supabase.from("shifts").select("*").eq("id", id).limit(1),
+      "getShiftById",
+    );
+    const row = (rows ?? [])[0];
+    return row ? rowToShift(row) : undefined;
+  }
+
+  async createShift(input: {
+    userId: number;
+    userName: string;
+    locationId: number;
+    locationName: string;
+    checkInLat: number;
+    checkInLng: number;
+    geofenceVerified: boolean;
+  }): Promise<Shift> {
+    const row = check(
+      await supabase
+        .from("shifts")
+        .insert({
+          user_id: input.userId,
+          user_name: input.userName,
+          location_id: input.locationId,
+          location_name: input.locationName,
+          check_in_at: new Date().toISOString(),
+          check_out_at: null,
+          check_in_lat: input.checkInLat,
+          check_in_lng: input.checkInLng,
+          geofence_verified: input.geofenceVerified,
+        })
+        .select("*")
+        .single(),
+      "createShift",
+    );
+    return rowToShift(row);
+  }
+
+  async closeShift(
+    id: number,
+    checkOutLat: number | null,
+    checkOutLng: number | null,
+  ): Promise<Shift | undefined> {
+    const rows = check(
+      await supabase
+        .from("shifts")
+        .update({
+          check_out_at: new Date().toISOString(),
+          check_out_lat: checkOutLat,
+          check_out_lng: checkOutLng,
+        })
+        .eq("id", id)
+        .is("check_out_at", null)
+        .select("*"),
+      "closeShift",
+    );
+    const row = (rows ?? [])[0];
+    return row ? rowToShift(row) : undefined;
   }
 
   // ---- Paid-car snapshots ----

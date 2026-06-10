@@ -134,7 +134,8 @@ export function FieldShell({
           </div>
         </div>
 
-        {/* Shift bar — STUB: shift state is placeholder until Page 2 wires it. */}
+        {/* Shift bar — reflects real shift state (Page 2). Green LED when on a
+            shift; neutral/dim when off shift. */}
         <div
           className="mt-[14px] flex items-center justify-between gap-2 rounded-[0.875rem] px-[13px] py-[11px]"
           style={{
@@ -152,16 +153,20 @@ export function FieldShell({
           <div
             className="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-1.5 text-[11.5px] font-bold"
             style={{
-              color: FIELD.ledText,
-              background: "rgba(94,224,160,.13)",
+              color: shift.onShift ? FIELD.ledText : "rgba(255,255,255,.6)",
+              background: shift.onShift
+                ? "rgba(94,224,160,.13)"
+                : "rgba(255,255,255,.08)",
             }}
             data-testid="field-shift-status"
           >
             <span
               className="h-[7px] w-[7px] rounded-full"
               style={{
-                background: FIELD.ledOn,
-                boxShadow: "0 0 0 3px rgba(63,207,134,.25)",
+                background: shift.onShift ? FIELD.ledOn : "rgba(255,255,255,.4)",
+                boxShadow: shift.onShift
+                  ? "0 0 0 3px rgba(63,207,134,.25)"
+                  : "none",
               }}
             />
             {shift.label}

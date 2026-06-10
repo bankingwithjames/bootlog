@@ -20,10 +20,14 @@ import {
   updateSettingsSchema,
   insertLocationSchema,
   updateLocationSchema,
+  checkInShiftSchema,
+  checkOutShiftSchema,
   type PaidSnapshot,
 } from "@shared/schema";
 import { fromZodError } from "zod-validation-error";
 import { fetchPaidCars, normalizePlate, type PaidCar } from "./stripe";
+import { geocodeAddress, isInsideGeofence } from "./geo";
+import { notifyShiftCheckIn, notifyShiftCheckOut } from "./sms";
 import {
   attachUser,
   requireAuth,
@@ -92,6 +96,18 @@ async function staffVisibleCutoffDay(
   if (!req.user || req.user.role === "admin") return null;
   const { historyVisibleDays } = await storage.getSettings();
   return dayMinus(todayKey(tz), historyVisibleDays);
+}
+
+// Human-readable elapsed label between two ISO timestamps, e.g. "3h 12m".
+// Used in the check-out SMS so the recipient sees how long the shift ran.
+function shiftDurationLabel(startIso: string, endIso: string): string {
+  const ms = new Date(endIso).getTime() - new Date(startIso).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return "0m";
+  const totalMin = Math.floor(ms / 60000);
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  if (h === 0) return `${m}m`;
+  return `${h}h ${m}m`;
 }
 
 // Resolve which location ids a request's user is allowed to see/act on.
@@ -403,6 +419,184 @@ export async function registerRoutes(
     if (!updated) return res.status(404).json({ message: "Location not found" });
     res.json(updated);
   });
+
+  // ---- Shifts (attendant geofenced check-in / check-out) ----
+  //
+  // Resolve a location's geofence center, geocoding its address lazily on the
+  // first need and caching the result. Returns null when the location has no
+  // usable address / can't be geocoded yet.
+  async function geofenceCenterFor(loc: {
+    id: number;
+    address: string;
+    latitude: number | null;
+    longitude: number | null;
+  }): Promise<{ lat: number; lng: number } | null> {
+    if (typeof loc.latitude === "number" && typeof loc.longitude === "number") {
+      return { lat: loc.latitude, lng: loc.longitude };
+    }
+    const geo = await geocodeAddress(loc.address);
+    if (!geo) return null;
+    await storage.setLocationGeofenceCenter(loc.id, geo.lat, geo.lng);
+    return geo;
+  }
+
+  // GET /api/shifts/active -> the current user's open shift (or null).
+  app.get("/api/shifts/active", requireAuth, async (req, res) => {
+    const shift = await storage.getActiveShiftForUser(req.user!.id);
+    res.json({ shift: shift ?? null });
+  });
+
+  // GET /api/shifts/geofence/:locationId -> the geofence the client should draw
+  // for a lot (center + radius), geocoding lazily. 422 if not geocodable yet.
+  app.get("/api/shifts/geofence/:locationId", requireAuth, async (req, res) => {
+    const locId = Number(req.params.locationId);
+    if (Number.isNaN(locId))
+      return res.status(400).json({ message: "Invalid location id" });
+    // Attendants may only query a lot they're assigned to; admins, any.
+    const allowed = await allowedLocationIds(req);
+    if (allowed !== null && !allowed.includes(locId)) {
+      return res.status(403).json({ message: "Not assigned to this location" });
+    }
+    const locations = await storage.getLocations();
+    const loc = locations.find((l) => l.id === locId);
+    if (!loc) return res.status(404).json({ message: "Location not found" });
+    const center = await geofenceCenterFor(loc);
+    if (!center) {
+      return res.status(422).json({
+        message:
+          "This lot's address can't be located yet. Add a valid street address in lot settings.",
+      });
+    }
+    res.json({
+      locationId: loc.id,
+      locationName: loc.name,
+      address: loc.address,
+      center,
+      radiusMeters: loc.geofenceRadius,
+    });
+  });
+
+  // POST /api/shifts/checkin { locationId, latitude, longitude, accuracy? }
+  // Attendants (and admins) open a shift. HARD-BLOCKED: the captured GPS point
+  // must be inside the location's geofence. Fires the check-in SMS (stubbed).
+  app.post(
+    "/api/shifts/checkin",
+    requireRole("attendant", "admin"),
+    async (req, res) => {
+      const parsed = checkInShiftSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res
+          .status(400)
+          .json({ message: fromZodError(parsed.error).toString() });
+      }
+      const me = req.user!;
+      const { locationId, latitude, longitude } = parsed.data;
+
+      // One open shift at a time.
+      const existing = await storage.getActiveShiftForUser(me.id);
+      if (existing) {
+        return res
+          .status(409)
+          .json({ message: "You already have an open shift.", shift: existing });
+      }
+
+      // Must be assigned to the lot (admins bypass).
+      const allowed = await allowedLocationIds(req);
+      if (allowed !== null && !allowed.includes(locationId)) {
+        return res
+          .status(403)
+          .json({ message: "You are not assigned to this lot." });
+      }
+
+      const locations = await storage.getLocations();
+      const loc = locations.find((l) => l.id === locationId);
+      if (!loc) return res.status(404).json({ message: "Location not found" });
+
+      const center = await geofenceCenterFor(loc);
+      if (!center) {
+        return res.status(422).json({
+          message:
+            "This lot's address can't be located yet, so check-in can't be verified.",
+        });
+      }
+
+      const inside = isInsideGeofence(
+        { lat: latitude, lng: longitude },
+        center,
+        loc.geofenceRadius,
+      );
+      if (!inside) {
+        // HARD BLOCK — no override.
+        return res.status(403).json({
+          message:
+            "You must be inside the lot to check in. Move closer to the lot and try again.",
+          code: "OUTSIDE_GEOFENCE",
+        });
+      }
+
+      const shift = await storage.createShift({
+        userId: me.id,
+        userName: me.name,
+        locationId: loc.id,
+        locationName: loc.name,
+        checkInLat: latitude,
+        checkInLng: longitude,
+        geofenceVerified: true,
+      });
+      notifyShiftCheckIn({
+        byName: me.name,
+        locationName: loc.name,
+        at: shift.checkInAt,
+      });
+      res.status(201).json(shift);
+    },
+  );
+
+  // PATCH /api/shifts/:id/checkout { latitude?, longitude? } -> close a shift.
+  // Only the shift's owner (or an admin) may close it. Fires check-out SMS.
+  app.patch(
+    "/api/shifts/:id/checkout",
+    requireRole("attendant", "admin"),
+    async (req, res) => {
+      const id = Number(req.params.id);
+      if (Number.isNaN(id))
+        return res.status(400).json({ message: "Invalid shift id" });
+      const parsed = checkOutShiftSchema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        return res
+          .status(400)
+          .json({ message: fromZodError(parsed.error).toString() });
+      }
+      const me = req.user!;
+      const shift = await storage.getShiftById(id);
+      if (!shift) return res.status(404).json({ message: "Shift not found" });
+      if (shift.checkOutAt)
+        return res.status(409).json({ message: "Shift is already closed." });
+      if (me.role !== "admin" && shift.userId !== me.id) {
+        return res
+          .status(403)
+          .json({ message: "You can only check out of your own shift." });
+      }
+      const closed = await storage.closeShift(
+        id,
+        parsed.data.latitude ?? null,
+        parsed.data.longitude ?? null,
+      );
+      if (!closed)
+        return res.status(409).json({ message: "Shift is already closed." });
+      const durationLabel = shiftDurationLabel(
+        closed.checkInAt,
+        closed.checkOutAt!,
+      );
+      notifyShiftCheckOut({
+        byName: closed.userName,
+        locationName: closed.locationName,
+        at: closed.checkOutAt!,
+        durationLabel,
+      });
+      res.json(closed);
+    },
+  );
 
   // ---- Boot requests ----
   // List: any signed-in user can see the queue.

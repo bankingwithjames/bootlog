@@ -1,13 +1,16 @@
 import { useMemo, useState } from "react";
 import { format, parseISO } from "date-fns";
+import { useQuery } from "@tanstack/react-query";
 import { Car, Lock, Search as SearchIcon, ChevronRight } from "lucide-react";
-import type { Boot, Location } from "@shared/schema";
+import type { Boot, Location, Shift } from "@shared/schema";
+import { apiRequest } from "@/lib/queryClient";
 import {
   FieldShell,
   FIELD,
   FIELD_MONO,
   type FieldView,
 } from "./FieldShell";
+import { FieldShift } from "./FieldShift";
 
 // Minimal shape of a paid car (from /api/paid-cars). Field Mode only needs the
 // plate for cross-reference and counting; full type lives in home.tsx.
@@ -23,6 +26,15 @@ function normalizePlate(plate: string): string {
 
 function currency(n: number): string {
   return n.toLocaleString("en-US", { style: "currency", currency: "USD" });
+}
+
+// Short "started at" label for the header shift bar (e.g. "9:53 AM").
+function shiftStartLabel(iso: string): string {
+  try {
+    return format(parseISO(iso), "h:mm a");
+  } catch {
+    return "now";
+  }
 }
 
 // Consolidated derived status shown as a single pill + left-edge color stripe.
@@ -535,6 +547,21 @@ export function FieldMode({
 }) {
   const [view, setView] = useState<FieldView>("home");
 
+  // Real shift state — the current user's open shift (or null). Drives both the
+  // header shift bar and the Shift tab. `refetchInterval` keeps the header label
+  // roughly fresh; FieldShift refetches on mutation via invalidateQueries.
+  const activeShiftQuery = useQuery<{ shift: Shift | null }>({
+    queryKey: ["/api/shifts/active"],
+    queryFn: async () => {
+      const res = await apiRequest("GET", "/api/shifts/active");
+      return res.json();
+    },
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+  });
+  const activeShift = activeShiftQuery.data?.shift ?? null;
+  const onShift = !!activeShift && !activeShift.checkOutAt;
+
   // Assigned lot: the attendant's first assigned location (staffLocations →
   // /api/locations/mine). Used to scope all dashboard data.
   const assignedLot = useMemo<Location | null>(() => {
@@ -579,12 +606,16 @@ export function FieldMode({
     canSeeFinancials,
   };
 
+  // Header shift bar label, derived from real shift state.
+  const shiftLabel = onShift
+    ? `On shift · since ${shiftStartLabel(activeShift!.checkInAt)}`
+    : "Off shift";
+
   return (
     <FieldShell
       userName={userName}
       lotName={assignedLot?.name ?? "No lot assigned"}
-      // STUB shift state — Page 2 wires real check-in/out + elapsed time.
-      shift={{ onShift: true, label: "On shift" }}
+      shift={{ onShift, label: shiftLabel }}
       hasUnread={false}
       active={view}
       onNavigate={setView}
@@ -607,7 +638,17 @@ export function FieldMode({
           }}
         />
       )}
-      {view !== "home" && <FieldStub view={view} onBack={() => setView("home")} />}
+      {view === "shift" && (
+        <FieldShift
+          assignedLot={assignedLot}
+          activeShift={activeShift}
+          onBack={() => setView("home")}
+          onShiftChange={() => activeShiftQuery.refetch()}
+        />
+      )}
+      {view !== "home" && view !== "shift" && (
+        <FieldStub view={view} onBack={() => setView("home")} />
+      )}
     </FieldShell>
   );
 }

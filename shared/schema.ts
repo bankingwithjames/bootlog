@@ -117,6 +117,14 @@ export const locations = sqliteTable("locations", {
   // Soft-disable: inactive locations are retained but not offered for new
   // boots and shown as Inactive in management.
   active: integer("active", { mode: "boolean" }).notNull().default(true),
+  // Geofence center, auto-detected by geocoding `address` server-side the first
+  // time it's needed. Null until geocoded (or if geocoding fails). The shift
+  // check-in flow uses these + geofenceRadius to verify the attendant is on-lot.
+  latitude: real("latitude"),
+  longitude: real("longitude"),
+  // Geofence radius in meters. Admin-tunable; defaults to 150m, a reasonable
+  // bound for a parking lot plus GPS jitter.
+  geofenceRadius: real("geofence_radius").notNull().default(150),
   createdAt: text("created_at").notNull(),
 });
 
@@ -155,6 +163,8 @@ export const updateLocationSchema = z.object({
     .regex(/^#[0-9a-fA-F]{6}$/, "Color must be a hex value")
     .optional(),
   active: z.boolean().optional(),
+  // Admin can tune the geofence radius (meters). Bounded to a sane range.
+  geofenceRadius: z.coerce.number().min(25).max(2000).optional(),
   // When provided, replaces the location's full staff-assignment set.
   staffIds: z.array(z.coerce.number().int()).optional(),
 });
@@ -418,3 +428,55 @@ export const updateSettingsSchema = z.object({
   showFinancialsToStaff: z.coerce.boolean().optional(),
 });
 export type UpdateSettingsInput = z.infer<typeof updateSettingsSchema>;
+
+// ---------------------------------------------------------------------------
+// Shifts (attendant geofenced check-in / check-out)
+// ---------------------------------------------------------------------------
+// A work shift an attendant opens by checking in while physically inside their
+// assigned lot's geofence, and closes by checking out. Check-in is HARD-BLOCKED
+// server-side: the captured GPS point must fall within the location's geofence
+// (center lat/lng + radius). An open shift has checkOutAt == null. Check-in and
+// check-out each fire an SMS notification to the enforcer/admin (stubbed until
+// the real provider is wired). At most one open shift per user at a time.
+export const shifts = sqliteTable("shifts", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  // Who is on shift (id + display-name snapshot for the audit trail).
+  userId: integer("user_id").notNull(),
+  userName: text("user_name").notNull().default(""),
+  // The lot this shift is tied to.
+  locationId: integer("location_id").notNull(),
+  locationName: text("location_name").notNull().default(""),
+  // ISO 8601 timestamps. checkOutAt is null while the shift is open.
+  checkInAt: text("check_in_at").notNull(),
+  checkOutAt: text("check_out_at"),
+  // GPS captured at check-in (verified inside the geofence) and at check-out.
+  checkInLat: real("check_in_lat"),
+  checkInLng: real("check_in_lng"),
+  checkOutLat: real("check_out_lat"),
+  checkOutLng: real("check_out_lng"),
+  // True once the server confirmed the check-in point was inside the geofence.
+  geofenceVerified: integer("geofence_verified", { mode: "boolean" })
+    .notNull()
+    .default(false),
+});
+
+export type Shift = typeof shifts.$inferSelect;
+
+// Attendant checks in: client sends its current GPS reading. The server
+// verifies the point is inside the assigned location's geofence before opening
+// the shift, so locationId is taken from the user's assignment, not the body.
+export const checkInShiftSchema = z.object({
+  locationId: z.coerce.number().int(),
+  latitude: z.number().min(-90).max(90),
+  longitude: z.number().min(-180).max(180),
+  // Optional client-reported accuracy (meters) for diagnostics/leniency.
+  accuracy: z.number().min(0).optional(),
+});
+export type CheckInShiftInput = z.infer<typeof checkInShiftSchema>;
+
+// Attendant checks out: GPS is captured for the audit trail but not gated.
+export const checkOutShiftSchema = z.object({
+  latitude: z.number().min(-90).max(90).nullable().optional(),
+  longitude: z.number().min(-180).max(180).nullable().optional(),
+});
+export type CheckOutShiftInput = z.infer<typeof checkOutShiftSchema>;

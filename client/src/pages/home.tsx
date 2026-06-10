@@ -321,6 +321,7 @@ export default function Home() {
     error: paidErrObj,
     refetch: refetchPaid,
     isFetching: paidFetching,
+    dataUpdatedAt: paidUpdatedAt,
   } = useQuery<{ cars: PaidCar[]; source: "live" | "stored" }>({
     queryKey: ["/api/paid-cars", filterDate, TZ_OFFSET],
     queryFn: async () => {
@@ -1255,7 +1256,9 @@ export default function Home() {
                           Live from Stripe
                         </Badge>
                       )}
-                      <span>Payment amount intentionally hidden.</span>
+                      {!paidLoading && !paidError && (
+                        <LastRefreshed updatedAt={paidUpdatedAt} />
+                      )}
                     </p>
                     <div className="flex items-center gap-2">
                       {/* Manual transaction entry is a financial action,
@@ -1647,6 +1650,37 @@ export default function Home() {
 // Capture/upload up to MAX_BOOT_PHOTOS images on the Place a Boot form.
 // Images are compressed client-side to JPEG data URLs. The hidden file input
 // uses `capture` so phones can open the camera directly (or pick from library).
+// Live "last refreshed" indicator. Re-renders on a timer so the relative
+// time ("just now", "2m ago") stays current without a manual refresh.
+function LastRefreshed({ updatedAt }: { updatedAt: number }) {
+  // Tick every 10s to keep the relative label fresh.
+  const [, setNow] = useState(Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 10_000);
+    return () => clearInterval(id);
+  }, []);
+
+  if (!updatedAt) return null;
+  const diffSec = Math.max(0, Math.round((Date.now() - updatedAt) / 1000));
+  let rel: string;
+  if (diffSec < 10) rel = "just now";
+  else if (diffSec < 60) rel = `${diffSec}s ago`;
+  else if (diffSec < 3600) rel = `${Math.floor(diffSec / 60)}m ago`;
+  else rel = `${Math.floor(diffSec / 3600)}h ago`;
+
+  return (
+    <span
+      className="inline-flex items-center gap-1 whitespace-nowrap"
+      data-testid="text-last-refreshed"
+      title={`Last refreshed ${format(new Date(updatedAt), "PPpp")}`}
+    >
+      <Clock className="h-3 w-3" />
+      Last refreshed {format(new Date(updatedAt), "h:mm:ss a")}
+      <span className="text-muted-foreground/70">({rel})</span>
+    </span>
+  );
+}
+
 // Quick-search input for filtering a table by license plate. Available to
 // every role as a default feature; purely client-side over already-loaded rows.
 function PlateSearch({

@@ -174,6 +174,10 @@ export const boots = sqliteTable("boots", {
   status: text("status").notNull().default("booted"),
   // ISO 8601 timestamp the boot was resolved (released/settled/completed).
   resolvedAt: text("resolved_at"),
+  // Optional GPS coordinates captured at the time the boot was placed, used as
+  // location evidence for disputes. Null when the device denies/lacks location.
+  latitude: real("latitude"),
+  longitude: real("longitude"),
   // Up to 5 evidence photos, stored as a JSON array of base64 data URLs.
   // SQLite has no array type, so this is a JSON text column parsed in app code.
   photos: text("photos").notNull().default("[]"),
@@ -193,6 +197,8 @@ export const insertBootSchema = createInsertSchema(boots)
     amountCollected: true,
     status: true,
     resolvedAt: true,
+    latitude: true,
+    longitude: true,
     photos: true,
     createdById: true,
     createdByName: true,
@@ -207,12 +213,17 @@ export const insertBootSchema = createInsertSchema(boots)
       .max(MAX_BOOT_PHOTOS, `At most ${MAX_BOOT_PHOTOS} photos are allowed`)
       .optional()
       .default([]),
+    // Optional GPS coordinates captured client-side at placement time.
+    latitude: z.number().min(-90).max(90).nullable().optional(),
+    longitude: z.number().min(-180).max(180).nullable().optional(),
   });
 
 export type InsertBoot = z.infer<typeof insertBootSchema>;
 // The DB row stores photos as a JSON string; the API returns a parsed array.
 export type Boot = Omit<typeof boots.$inferSelect, "photos"> & {
   photos: string[];
+  latitude: number | null;
+  longitude: number | null;
 };
 
 // Payload for resolving / updating a boot's enforcement status.

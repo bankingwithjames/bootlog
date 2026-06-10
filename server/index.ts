@@ -14,15 +14,20 @@ declare module "http" {
   }
 }
 
+// Evidence photos are sent inline as base64 data URLs inside the JSON body.
+// Up to MAX_BOOT_PHOTOS images at full capture quality can add up, so the
+// default 100kb body limit must be raised well beyond that to avoid 413
+// "request entity too large" errors when placing a boot with photos.
 app.use(
   express.json({
+    limit: "25mb",
     verify: (req, _res, buf) => {
       req.rawBody = buf;
     },
   }),
 );
 
-app.use(express.urlencoded({ extended: false }));
+app.use(express.urlencoded({ extended: false, limit: "25mb" }));
 
 export function log(message: string, source = "express") {
   const formattedTime = new Date().toLocaleTimeString("en-US", {

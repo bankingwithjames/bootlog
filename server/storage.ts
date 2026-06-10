@@ -69,6 +69,8 @@ function rowToBoot(row: any): Boot {
     amountCollected: row.amount_collected ?? 0,
     status: row.status,
     resolvedAt: row.resolved_at ?? null,
+    latitude: row.latitude ?? null,
+    longitude: row.longitude ?? null,
     photos: parsePhotos(row.photos),
     createdById: row.created_by_id ?? null,
     createdByName: row.created_by_name ?? "",
@@ -385,7 +387,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createBoot(insertBoot: InsertBoot, actor?: Actor): Promise<Boot> {
-    const { photos = [], ...rest } = insertBoot;
+    const { photos = [], latitude, longitude, ...rest } = insertBoot;
     const row = check(
       await supabase
         .from("boots")
@@ -397,6 +399,8 @@ export class DatabaseStorage implements IStorage {
           status: "booted",
           amount_collected: 0,
           resolved_at: null,
+          latitude: latitude ?? null,
+          longitude: longitude ?? null,
           photos: JSON.stringify(photos.slice(0, 5)),
           created_by_id: actor?.id ?? null,
           created_by_name: actor?.name ?? "",

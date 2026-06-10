@@ -40,6 +40,8 @@ import {
   Check,
   Ban,
   EyeOff,
+  MapPin,
+  Crosshair,
 } from "lucide-react";
 
 import {
@@ -381,11 +383,68 @@ export default function Home() {
       bootedAt: nowLocalInput(),
       bootFee: 0,
       photos: [],
+      latitude: null,
+      longitude: null,
     },
   });
 
   // Lightbox: the full-size photo currently being viewed (or null).
   const [lightbox, setLightbox] = useState<string | null>(null);
+
+  // Floating "+ Place Boot" dialog (dedicated capture screen) open state.
+  const [bootDialogOpen, setBootDialogOpen] = useState(false);
+  // Live GPS-capture status shown inside the boot form.
+  const [geoStatus, setGeoStatus] = useState<
+    "idle" | "locating" | "ready" | "error"
+  >("idle");
+  const [geoError, setGeoError] = useState<string | null>(null);
+
+  // Capture the device's current location and store it on the form. Best-effort:
+  // if the user denies permission or it's unavailable, the boot still saves
+  // without coordinates.
+  function captureLocation() {
+    if (!("geolocation" in navigator)) {
+      setGeoStatus("error");
+      setGeoError("Location is not available on this device.");
+      return;
+    }
+    setGeoStatus("locating");
+    setGeoError(null);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        form.setValue("latitude", Number(pos.coords.latitude.toFixed(6)));
+        form.setValue("longitude", Number(pos.coords.longitude.toFixed(6)));
+        setGeoStatus("ready");
+      },
+      (err) => {
+        setGeoStatus("error");
+        setGeoError(
+          err.code === err.PERMISSION_DENIED
+            ? "Location permission denied. The boot will save without GPS."
+            : "Couldn't get location. The boot will save without GPS.",
+        );
+      },
+      { enableHighAccuracy: true, timeout: 10_000, maximumAge: 0 },
+    );
+  }
+
+  // Open the dedicated Place-a-Boot screen: reset the form to a fresh entry,
+  // stamp the current time, and start capturing GPS immediately.
+  function openBootDialog() {
+    form.reset({
+      licensePlate: "",
+      makeModel: "",
+      bootedAt: nowLocalInput(),
+      bootFee: 0,
+      photos: [],
+      latitude: null,
+      longitude: null,
+    });
+    setGeoStatus("idle");
+    setGeoError(null);
+    setBootDialogOpen(true);
+    captureLocation();
+  }
 
   const createMutation = useMutation({
     mutationFn: async (values: FormValues) => {
@@ -405,20 +464,197 @@ export default function Home() {
         bootedAt: nowLocalInput(),
         bootFee: 0,
         photos: [],
+        latitude: null,
+        longitude: null,
       });
+      setGeoStatus("idle");
+      setGeoError(null);
+      setBootDialogOpen(false);
       toast({
         title: "Boot placed",
         description: "Vehicle is now on boot, awaiting resolution.",
       });
     },
     onError: (err: Error) => {
+      const tooLarge = /413|too large|entity too large/i.test(err.message);
       toast({
         title: "Could not log boot",
-        description: err.message,
+        description: tooLarge
+          ? "The photos are too large to upload. Try taking fewer photos or retaking them."
+          : err.message,
         variant: "destructive",
       });
     },
   });
+
+  // The Place-a-Boot form body, shared between the inline desktop card and the
+  // floating-action dedicated screen so both stay perfectly in sync.
+  function renderBootForm() {
+    const lat = form.watch("latitude");
+    const lng = form.watch("longitude");
+    return (
+      <Form {...form}>
+        <form
+          onSubmit={form.handleSubmit((v) => createMutation.mutate(v))}
+          className="space-y-4"
+        >
+          <FormField
+            control={form.control}
+            name="licensePlate"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>License Plate</FormLabel>
+                <FormControl>
+                  <Input
+                    placeholder="ABC-1234"
+                    autoComplete="off"
+                    className="uppercase"
+                    data-testid="input-plate"
+                    {...field}
+                  />
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+          <FormField
+            control={form.control}
+            name="makeModel"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Make &amp; Model</FormLabel>
+                <FormControl>
+                  <Input
+                    placeholder="Honda Civic"
+                    autoComplete="off"
+                    data-testid="input-makemodel"
+                    {...field}
+                  />
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+          <FormField
+            control={form.control}
+            name="bootedAt"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Date &amp; Time</FormLabel>
+                <FormControl>
+                  <Input
+                    type="datetime-local"
+                    data-testid="input-datetime"
+                    {...field}
+                  />
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+          <FormField
+            control={form.control}
+            name="bootFee"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Boot Fee Owed ($)</FormLabel>
+                <FormControl>
+                  <div className="relative">
+                    <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">
+                      $
+                    </span>
+                    <Input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      placeholder="0.00"
+                      className="pl-7"
+                      data-testid="input-fee"
+                      {...field}
+                    />
+                  </div>
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+          <FormField
+            control={form.control}
+            name="photos"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>
+                  Evidence Photos{" "}
+                  <span className="font-normal text-muted-foreground">
+                    (up to {MAX_BOOT_PHOTOS})
+                  </span>
+                </FormLabel>
+                <FormControl>
+                  <PhotoUploadField
+                    value={field.value ?? []}
+                    onChange={field.onChange}
+                    onView={(src) => setLightbox(src)}
+                  />
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+          {/* GPS location capture — automatic, with a manual retry. */}
+          <div className="space-y-1" data-testid="section-gps">
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-medium">Location</span>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-7 px-2 text-xs"
+                onClick={captureLocation}
+                disabled={geoStatus === "locating"}
+                data-testid="button-capture-location"
+              >
+                {geoStatus === "locating" ? (
+                  <RefreshCw className="mr-1 h-3 w-3 animate-spin" />
+                ) : (
+                  <Crosshair className="mr-1 h-3 w-3" />
+                )}
+                {geoStatus === "locating"
+                  ? "Locating…"
+                  : geoStatus === "ready"
+                    ? "Update"
+                    : "Capture"}
+              </Button>
+            </div>
+            <p
+              className="flex items-center gap-1 text-xs text-muted-foreground"
+              data-testid="text-gps-status"
+            >
+              <MapPin className="h-3 w-3 shrink-0" />
+              {geoStatus === "ready" && lat != null && lng != null ? (
+                <span className="tabular-nums">
+                  {lat.toFixed(5)}, {lng.toFixed(5)} — captured
+                </span>
+              ) : geoStatus === "locating" ? (
+                <span>Getting current location…</span>
+              ) : geoStatus === "error" ? (
+                <span>{geoError ?? "Location unavailable."}</span>
+              ) : (
+                <span>Location not captured yet.</span>
+              )}
+            </p>
+          </div>
+          <Button
+            type="submit"
+            className="w-full"
+            disabled={createMutation.isPending}
+            data-testid="button-submit"
+          >
+            {createMutation.isPending ? "Saving…" : "Place Boot"}
+          </Button>
+        </form>
+      </Form>
+    );
+  }
 
   // Advance a boot through the enforcement lifecycle.
   const statusMutation = useMutation({
@@ -897,121 +1133,7 @@ export default function Home() {
                 enforcement queue as <strong>Booted</strong>.
               </CardDescription>
             </CardHeader>
-            <CardContent>
-              <Form {...form}>
-                <form
-                  onSubmit={form.handleSubmit((v) => createMutation.mutate(v))}
-                  className="space-y-4"
-                >
-                  <FormField
-                    control={form.control}
-                    name="licensePlate"
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>License Plate</FormLabel>
-                        <FormControl>
-                          <Input
-                            placeholder="ABC-1234"
-                            autoComplete="off"
-                            className="uppercase"
-                            data-testid="input-plate"
-                            {...field}
-                          />
-                        </FormControl>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
-                  <FormField
-                    control={form.control}
-                    name="makeModel"
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>Make &amp; Model</FormLabel>
-                        <FormControl>
-                          <Input
-                            placeholder="Honda Civic"
-                            autoComplete="off"
-                            data-testid="input-makemodel"
-                            {...field}
-                          />
-                        </FormControl>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
-                  <FormField
-                    control={form.control}
-                    name="bootedAt"
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>Date &amp; Time</FormLabel>
-                        <FormControl>
-                          <Input type="datetime-local" data-testid="input-datetime" {...field} />
-                        </FormControl>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
-                  <FormField
-                    control={form.control}
-                    name="bootFee"
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>Boot Fee Owed ($)</FormLabel>
-                        <FormControl>
-                          <div className="relative">
-                            <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">
-                              $
-                            </span>
-                            <Input
-                              type="number"
-                              step="0.01"
-                              min="0"
-                              placeholder="0.00"
-                              className="pl-7"
-                              data-testid="input-fee"
-                              {...field}
-                            />
-                          </div>
-                        </FormControl>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
-                  <FormField
-                    control={form.control}
-                    name="photos"
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>
-                          Evidence Photos{" "}
-                          <span className="font-normal text-muted-foreground">
-                            (up to {MAX_BOOT_PHOTOS})
-                          </span>
-                        </FormLabel>
-                        <FormControl>
-                          <PhotoUploadField
-                            value={field.value ?? []}
-                            onChange={field.onChange}
-                            onView={(src) => setLightbox(src)}
-                          />
-                        </FormControl>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
-                  <Button
-                    type="submit"
-                    className="w-full"
-                    disabled={createMutation.isPending}
-                    data-testid="button-submit"
-                  >
-                    {createMutation.isPending ? "Saving…" : "Place Boot"}
-                  </Button>
-                </form>
-              </Form>
-            </CardContent>
+            <CardContent>{renderBootForm()}</CardContent>
           </Card>
           ) : (
           <Card className="h-fit lg:sticky lg:top-20" data-testid="card-request-prompt">
@@ -1182,11 +1304,18 @@ export default function Home() {
                                   )}
                                 </TableCell>
                                 <TableCell>
-                                  <PhotoThumbs
-                                    photos={b.photos ?? []}
-                                    bootId={b.id}
-                                    onView={(src) => setLightbox(src)}
-                                  />
+                                  <div className="flex flex-col gap-1.5">
+                                    <PhotoThumbs
+                                      photos={b.photos ?? []}
+                                      bootId={b.id}
+                                      onView={(src) => setLightbox(src)}
+                                    />
+                                    <BootLocation
+                                      latitude={b.latitude}
+                                      longitude={b.longitude}
+                                      bootId={b.id}
+                                    />
+                                  </div>
                                 </TableCell>
                                 <TableCell className="text-right tabular-nums whitespace-nowrap">
                                   <span className="text-muted-foreground">
@@ -1639,6 +1768,42 @@ export default function Home() {
           )}
         </DialogContent>
       </Dialog>
+
+      {/* Floating action button: opens the dedicated Place-a-Boot screen so
+          field users don't have to scroll a long inline form. Enforcers/admins
+          only. */}
+      {can.placeBoot && (
+        <Button
+          type="button"
+          onClick={openBootDialog}
+          className="fixed bottom-5 right-5 z-40 h-14 rounded-full px-5 shadow-lg sm:bottom-8 sm:right-8"
+          data-testid="button-fab-place-boot"
+          aria-label="Place a boot"
+        >
+          <Plus className="mr-1.5 h-5 w-5" />
+          Place Boot
+        </Button>
+      )}
+
+      {/* Dedicated Place-a-Boot screen (mobile-friendly full-screen capture). */}
+      <Dialog open={bootDialogOpen} onOpenChange={setBootDialogOpen}>
+        <DialogContent
+          className="max-h-[90vh] gap-4 overflow-y-auto sm:max-w-md"
+          data-testid="dialog-place-boot"
+        >
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Plus className="h-4 w-4 text-primary" />
+              Place a Boot
+            </DialogTitle>
+            <DialogDescription>
+              Capture the vehicle, evidence photos, and location. The time is
+              recorded automatically.
+            </DialogDescription>
+          </DialogHeader>
+          {renderBootForm()}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -1877,6 +2042,33 @@ function PhotoThumbs({
   );
 }
 
+// Map-pin link to the GPS location captured when a boot was placed. Opens the
+// coordinates in the device's default maps app. Renders nothing if no location.
+function BootLocation({
+  latitude,
+  longitude,
+  bootId,
+}: {
+  latitude: number | null;
+  longitude: number | null;
+  bootId: number;
+}) {
+  if (latitude == null || longitude == null) return null;
+  return (
+    <a
+      href={`https://www.google.com/maps?q=${latitude},${longitude}`}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="mt-1 inline-flex items-center gap-1 text-xs text-primary hover:underline"
+      data-testid={`link-location-${bootId}`}
+      title={`Captured location: ${latitude}, ${longitude}`}
+    >
+      <MapPin className="h-3 w-3" />
+      Location
+    </a>
+  );
+}
+
 // ---------- enforcement queue ----------
 const ENFORCEMENT_FILTERS = [
   { value: "booted", label: "Booted" },
@@ -2092,11 +2284,18 @@ function EnforcementView({
                         />
                       </TableCell>
                       <TableCell>
-                        <PhotoThumbs
-                          photos={b.photos ?? []}
-                          bootId={b.id}
-                          onView={onView}
-                        />
+                        <div className="flex flex-col gap-1.5">
+                          <PhotoThumbs
+                            photos={b.photos ?? []}
+                            bootId={b.id}
+                            onView={onView}
+                          />
+                          <BootLocation
+                            latitude={b.latitude}
+                            longitude={b.longitude}
+                            bootId={b.id}
+                          />
+                        </div>
                       </TableCell>
                       <TableCell className="whitespace-nowrap text-right tabular-nums">
                         <span data-testid={`text-fee-${b.id}`}>

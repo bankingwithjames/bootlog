@@ -26,7 +26,12 @@ import {
 } from "@shared/schema";
 import { fromZodError } from "zod-validation-error";
 import { fetchPaidCars, normalizePlate, type PaidCar } from "./stripe";
-import { geocodeAddress, isInsideGeofence } from "./geo";
+import {
+  geocodeAddress,
+  isInsideGeofence,
+  buildStaticMapUrl,
+  fetchStaticMap,
+} from "./geo";
 import { notifyShiftCheckIn, notifyShiftCheckOut } from "./sms";
 import {
   attachUser,
@@ -475,6 +480,68 @@ export async function registerRoutes(
       radiusMeters: loc.geofenceRadius,
     });
   });
+
+  // GET /api/shifts/staticmap/:locationId?lat=&lng=&w=&h=
+  // Server-proxied Google Static Maps image for the lot's geofence. The API key
+  // is injected by the credential proxy on the outbound call, so it never ships
+  // to the browser. Optional lat/lng plots the attendant's current position
+  // (blue inside the fence, red outside). Returns the image bytes directly.
+  app.get(
+    "/api/shifts/staticmap/:locationId",
+    requireAuth,
+    async (req, res) => {
+      const locId = Number(req.params.locationId);
+      if (Number.isNaN(locId))
+        return res.status(400).json({ message: "Invalid location id" });
+      const allowed = await allowedLocationIds(req);
+      if (allowed !== null && !allowed.includes(locId)) {
+        return res
+          .status(403)
+          .json({ message: "Not assigned to this location" });
+      }
+      const locations = await storage.getLocations();
+      const loc = locations.find((l) => l.id === locId);
+      if (!loc) return res.status(404).json({ message: "Location not found" });
+      const center = await geofenceCenterFor(loc);
+      if (!center)
+        return res
+          .status(422)
+          .json({ message: "This lot's address can't be located yet." });
+
+      // Optional user position.
+      const latRaw = Number(req.query.lat);
+      const lngRaw = Number(req.query.lng);
+      const user =
+        !Number.isNaN(latRaw) &&
+        !Number.isNaN(lngRaw) &&
+        Math.abs(latRaw) <= 90 &&
+        Math.abs(lngRaw) <= 180
+          ? { lat: latRaw, lng: lngRaw }
+          : null;
+
+      // Clamp requested dimensions (Static Maps max 640x640 before scale).
+      const w = Math.min(640, Math.max(200, Number(req.query.w) || 600));
+      const h = Math.min(640, Math.max(120, Number(req.query.h) || 376));
+
+      const mapPath = buildStaticMapUrl({
+        center,
+        radiusMeters: loc.geofenceRadius,
+        user,
+        widthPx: w,
+        heightPx: h,
+        scale: 2,
+      });
+      const img = await fetchStaticMap(mapPath);
+      if (!img) {
+        return res
+          .status(502)
+          .json({ message: "Map image is temporarily unavailable." });
+      }
+      res.setHeader("Content-Type", img.contentType);
+      res.setHeader("Cache-Control", "private, max-age=30");
+      return res.end(img.body);
+    },
+  );
 
   // POST /api/shifts/checkin { locationId, latitude, longitude, accuracy? }
   // Attendants (and admins) open a shift. HARD-BLOCKED: the captured GPS point

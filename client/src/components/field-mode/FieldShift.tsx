@@ -21,7 +21,6 @@ import type { Location, Shift } from "@shared/schema";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { FIELD, FIELD_FONT, FIELD_MONO } from "./FieldShell";
-import { loadGoogleMaps, hasGoogleMapsKey } from "./googleMaps";
 
 // ---------------------------------------------------------------------------
 // FieldShift — attendant shift check-in / check-out with a GPS geofence HARD
@@ -403,73 +402,56 @@ export function FieldShift({
 }
 
 // ---------------------------------------------------------------------------
-// Live Google Map with geofence circle + lot pin + user dot. Falls back to a
-// schematic grid (matching the mockup) when the Maps key is unavailable.
+// Server-proxied Google Static Map with geofence circle + lot pin + user dot.
+// The image is fetched through /api/shifts/staticmap (the API key is injected
+// server-side by the credential proxy and never ships to the browser). We fetch
+// via apiRequest so the auth token is attached, then render the bytes as an
+// object URL. Falls back to a schematic grid if the image can't be loaded.
 // ---------------------------------------------------------------------------
 function ShiftMap({
-  center,
-  radiusMeters,
+  locationId,
   user,
   inside,
 }: {
-  center: { lat: number; lng: number };
-  radiusMeters: number;
+  locationId: number;
   user: { lat: number; lng: number } | null;
   inside: boolean;
 }) {
-  const ref = useRef<HTMLDivElement | null>(null);
-  const mapRef = useRef<any>(null);
-  const circleRef = useRef<any>(null);
-  const lotMarkerRef = useRef<any>(null);
-  const userMarkerRef = useRef<any>(null);
+  const [src, setSrc] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
+  const objectUrlRef = useRef<string | null>(null);
+
+  // Round the user position so tiny GPS jitter doesn't refetch the image every
+  // second; ~5 decimals ≈ 1m.
+  const userKey = user
+    ? `${user.lat.toFixed(5)},${user.lng.toFixed(5)}`
+    : "none";
 
   useEffect(() => {
     let cancelled = false;
-    if (!hasGoogleMapsKey()) {
-      setFailed(true);
-      return;
+    const params = new URLSearchParams();
+    if (user) {
+      params.set("lat", String(user.lat));
+      params.set("lng", String(user.lng));
     }
-    loadGoogleMaps()
-      .then((maps) => {
-        if (cancelled || !ref.current) return;
-        const map = new maps.Map(ref.current, {
-          center,
-          zoom: 16,
-          disableDefaultUI: true,
-          gestureHandling: "greedy",
-          clickableIcons: false,
-          styles: [
-            { featureType: "poi", stylers: [{ visibility: "off" }] },
-            { featureType: "transit", stylers: [{ visibility: "off" }] },
-          ],
-        });
-        mapRef.current = map;
-
-        circleRef.current = new maps.Circle({
-          map,
-          center,
-          radius: radiusMeters,
-          strokeColor: FIELD.accent,
-          strokeOpacity: 0.9,
-          strokeWeight: 2,
-          fillColor: FIELD.accent,
-          fillOpacity: 0.12,
-        });
-
-        lotMarkerRef.current = new maps.Marker({
-          map,
-          position: center,
-          title: "Lot center",
-          icon: {
-            path: maps.SymbolPath.CIRCLE,
-            scale: 6,
-            fillColor: FIELD.header,
-            fillOpacity: 1,
-            strokeColor: "#fff",
-            strokeWeight: 3,
-          },
-        });
+    params.set("w", "600");
+    params.set("h", "376");
+    apiRequest(
+      "GET",
+      `/api/shifts/staticmap/${locationId}?${params.toString()}`,
+    )
+      .then((res) => res.blob())
+      .then((blob) => {
+        if (cancelled) return;
+        if (!blob.type.startsWith("image/")) {
+          setFailed(true);
+          return;
+        }
+        const objUrl = URL.createObjectURL(blob);
+        if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
+        objectUrlRef.current = objUrl;
+        setSrc(objUrl);
+        setFailed(false);
       })
       .catch(() => {
         if (!cancelled) setFailed(true);
@@ -478,62 +460,34 @@ function ShiftMap({
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [locationId, userKey]);
 
-  // Update user marker + recenter when position changes.
+  // Clean up the last object URL on unmount.
   useEffect(() => {
-    const maps = (window as any).google?.maps;
-    if (!maps || !mapRef.current) return;
-    if (!user) return;
-    const color = inside ? FIELD.accent : "#c0392b";
-    if (!userMarkerRef.current) {
-      userMarkerRef.current = new maps.Marker({
-        map: mapRef.current,
-        position: user,
-        title: "You",
-        icon: {
-          path: maps.SymbolPath.CIRCLE,
-          scale: 7,
-          fillColor: color,
-          fillOpacity: 1,
-          strokeColor: "#fff",
-          strokeWeight: 3,
-        },
-        zIndex: 999,
-      });
-    } else {
-      userMarkerRef.current.setPosition(user);
-      userMarkerRef.current.setIcon({
-        path: maps.SymbolPath.CIRCLE,
-        scale: 7,
-        fillColor: color,
-        fillOpacity: 1,
-        strokeColor: "#fff",
-        strokeWeight: 3,
-      });
-    }
-    // Keep both lot + user roughly in view.
-    try {
-      const bounds = new maps.LatLngBounds();
-      bounds.extend(center);
-      bounds.extend(user);
-      mapRef.current.fitBounds(bounds, 60);
-    } catch {
-      /* ignore */
-    }
-  }, [user, inside, center]);
+    return () => {
+      if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
+    };
+  }, []);
 
   if (failed) {
     return <SchematicMap inside={inside} />;
   }
-
+  if (!src) {
+    return <MapSkeleton label="Loading map…" />;
+  }
   return (
     <div
-      ref={ref}
-      className="overflow-hidden rounded-[0.875rem]"
+      className="relative overflow-hidden rounded-[0.875rem]"
       style={{ height: 188, border: `1px solid ${FIELD.line}`, background: "#eef2f6" }}
       data-testid="shift-map"
-    />
+    >
+      <img
+        src={src}
+        alt="Lot geofence map"
+        className="h-full w-full object-cover"
+        data-testid="shift-map-img"
+      />
+    </div>
   );
 }
 
@@ -659,8 +613,7 @@ function PreShiftState({
   return (
     <>
       <ShiftMap
-        center={geofence.center}
-        radiusMeters={geofence.radiusMeters}
+        locationId={geofence.locationId}
         user={position ? { lat: position.lat, lng: position.lng } : null}
         inside={inside}
       />

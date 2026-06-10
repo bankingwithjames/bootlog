@@ -12,6 +12,9 @@ export default defineConfig({
     },
   },
   root: path.resolve(import.meta.dirname, "client"),
+  // Load .env from the project root (not client/) so VITE_* build vars
+  // live alongside the server's SUPABASE_* vars in a single gitignored .env.
+  envDir: path.resolve(import.meta.dirname),
   base: "./",
   build: {
     outDir: path.resolve(import.meta.dirname, "dist/public"),

@@ -402,13 +402,245 @@ export function FieldShift({
 }
 
 // ---------------------------------------------------------------------------
-// Server-proxied Google Static Map with geofence circle + lot pin + user dot.
-// The image is fetched through /api/shifts/staticmap (the API key is injected
-// server-side by the credential proxy and never ships to the browser). We fetch
-// via apiRequest so the auth token is attached, then render the bytes as an
-// object URL. Falls back to a schematic grid if the image can't be loaded.
+// ShiftMap — geofence map orchestrator with a three-tier fallback chain:
+//
+//   1. Interactive Google JS map (pan/zoom) — only when a browser-only build
+//      key (VITE_GOOGLE_MAPS_KEY) is present. Renders a real google.maps.Circle
+//      geofence overlay, a navy lot marker, and a color-coded user marker. This
+//      is the PRODUCTION map path (the published sandbox has no credential
+//      proxy, so the server static route can't work there).
+//   2. Server-proxied Google Static Map (StaticMap) — used in preview/dev where
+//      the credential proxy injects the server key server-side. Never ships a
+//      key to the browser.
+//   3. Schematic grid — last-resort offline fallback.
+//
+// The map style/framing matches the approved Signal Blue static mock.
 // ---------------------------------------------------------------------------
+const MAP_HEIGHT = 188;
+const BROWSER_MAPS_KEY = import.meta.env.VITE_GOOGLE_MAPS_KEY as
+  | string
+  | undefined;
+
 function ShiftMap({
+  locationId,
+  center,
+  radiusMeters,
+  user,
+  inside,
+}: {
+  locationId: number;
+  center: { lat: number; lng: number };
+  radiusMeters: number;
+  user: { lat: number; lng: number } | null;
+  inside: boolean;
+}) {
+  // If a referrer-locked browser key was baked in at build time, prefer the
+  // interactive JS map. If it fails to load (network/quota/referrer), fall
+  // through to the server static image, then the schematic.
+  if (BROWSER_MAPS_KEY) {
+    return (
+      <InteractiveMap
+        center={center}
+        radiusMeters={radiusMeters}
+        user={user}
+        inside={inside}
+        fallback={
+          <StaticMap locationId={locationId} user={user} inside={inside} />
+        }
+      />
+    );
+  }
+  return <StaticMap locationId={locationId} user={user} inside={inside} />;
+}
+
+// ---------------------------------------------------------------------------
+// Google Maps JS API loader — loads the script exactly once and resolves when
+// the `google.maps` namespace is ready. Returns a shared promise so multiple
+// mounts don't inject duplicate <script> tags.
+// ---------------------------------------------------------------------------
+let mapsLoaderPromise: Promise<void> | null = null;
+function loadGoogleMaps(key: string): Promise<void> {
+  if (typeof window === "undefined") return Promise.reject(new Error("no window"));
+  if ((window as any).google?.maps) return Promise.resolve();
+  if (mapsLoaderPromise) return mapsLoaderPromise;
+  mapsLoaderPromise = new Promise<void>((resolve, reject) => {
+    const existing = document.getElementById("gmaps-js") as HTMLScriptElement | null;
+    if (existing) {
+      existing.addEventListener("load", () => resolve());
+      existing.addEventListener("error", () => reject(new Error("maps load error")));
+      return;
+    }
+    const s = document.createElement("script");
+    s.id = "gmaps-js";
+    s.async = true;
+    s.defer = true;
+    s.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(
+      key,
+    )}&libraries=marker`;
+    s.addEventListener("load", () => resolve());
+    s.addEventListener("error", () => {
+      mapsLoaderPromise = null; // allow a retry on next mount
+      reject(new Error("maps load error"));
+    });
+    document.head.appendChild(s);
+  });
+  return mapsLoaderPromise;
+}
+
+// ---------------------------------------------------------------------------
+// InteractiveMap — pan/zoom Google JS map with a real geofence Circle overlay,
+// navy lot marker, and color-coded user marker. Falls back to `fallback` if
+// the script can't load.
+// ---------------------------------------------------------------------------
+function InteractiveMap({
+  center,
+  radiusMeters,
+  user,
+  inside,
+  fallback,
+}: {
+  center: { lat: number; lng: number };
+  radiusMeters: number;
+  user: { lat: number; lng: number } | null;
+  inside: boolean;
+  fallback: React.ReactNode;
+}) {
+  const elRef = useRef<HTMLDivElement | null>(null);
+  const mapRef = useRef<any>(null);
+  const circleRef = useRef<any>(null);
+  const lotMarkerRef = useRef<any>(null);
+  const userMarkerRef = useRef<any>(null);
+  const [ready, setReady] = useState(false);
+  const [failed, setFailed] = useState(false);
+
+  // Load the script + create the base map / static overlays once.
+  useEffect(() => {
+    let cancelled = false;
+    loadGoogleMaps(BROWSER_MAPS_KEY as string)
+      .then(() => {
+        if (cancelled || !elRef.current) return;
+        const g = (window as any).google;
+        const map = new g.maps.Map(elRef.current, {
+          center,
+          zoom: 16,
+          disableDefaultUI: true,
+          zoomControl: true,
+          gestureHandling: "greedy",
+          clickableIcons: false,
+          styles: [
+            { featureType: "poi", stylers: [{ visibility: "off" }] },
+            { featureType: "transit", stylers: [{ visibility: "off" }] },
+          ],
+        });
+        mapRef.current = map;
+
+        // Geofence circle (Signal Blue accent).
+        circleRef.current = new g.maps.Circle({
+          map,
+          center,
+          radius: radiusMeters,
+          strokeColor: FIELD.accent,
+          strokeOpacity: 0.9,
+          strokeWeight: 2,
+          fillColor: FIELD.accent,
+          fillOpacity: 0.12,
+          clickable: false,
+        });
+
+        // Navy lot marker at the geofence center.
+        lotMarkerRef.current = new g.maps.Marker({
+          map,
+          position: center,
+          icon: {
+            path: g.maps.SymbolPath.CIRCLE,
+            scale: 6,
+            fillColor: FIELD.header,
+            fillOpacity: 1,
+            strokeColor: "#ffffff",
+            strokeWeight: 3,
+          },
+          zIndex: 2,
+        });
+
+        setReady(true);
+      })
+      .catch(() => {
+        if (!cancelled) setFailed(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Keep the circle/center in sync if the lot config changes.
+  useEffect(() => {
+    if (!ready || !circleRef.current) return;
+    circleRef.current.setCenter(center);
+    circleRef.current.setRadius(radiusMeters);
+    lotMarkerRef.current?.setPosition(center);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, center.lat, center.lng, radiusMeters]);
+
+  // Add / update / color the user marker as the GPS fix moves.
+  useEffect(() => {
+    if (!ready || !mapRef.current) return;
+    const g = (window as any).google;
+    if (!user) {
+      userMarkerRef.current?.setMap(null);
+      userMarkerRef.current = null;
+      return;
+    }
+    const color = inside ? FIELD.accent : "#c0392b";
+    const icon = {
+      path: g.maps.SymbolPath.CIRCLE,
+      scale: 7,
+      fillColor: color,
+      fillOpacity: 1,
+      strokeColor: "#ffffff",
+      strokeWeight: 3,
+    };
+    if (!userMarkerRef.current) {
+      userMarkerRef.current = new g.maps.Marker({
+        map: mapRef.current,
+        position: user,
+        icon,
+        zIndex: 3,
+      });
+    } else {
+      userMarkerRef.current.setPosition(user);
+      userMarkerRef.current.setIcon(icon);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, user?.lat, user?.lng, inside]);
+
+  if (failed) {
+    return <>{fallback}</>;
+  }
+  return (
+    <div
+      className="relative overflow-hidden rounded-[0.875rem]"
+      style={{ height: MAP_HEIGHT, border: `1px solid ${FIELD.line}`, background: "#eef2f6" }}
+      data-testid="shift-map"
+    >
+      <div ref={elRef} className="h-full w-full" data-testid="shift-map-interactive" />
+      {!ready && (
+        <div className="absolute inset-0">
+          <MapSkeleton label="Loading map…" />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// StaticMap — server-proxied Google Static Map with geofence circle + lot pin +
+// user dot. The image is fetched through /api/shifts/staticmap (the API key is
+// injected server-side by the credential proxy and never ships to the browser).
+// We fetch via apiRequest so the auth token is attached, then render the bytes
+// as an object URL. Falls back to a schematic grid if the image can't load.
+// ---------------------------------------------------------------------------
+function StaticMap({
   locationId,
   user,
   inside,
@@ -478,7 +710,7 @@ function ShiftMap({
   return (
     <div
       className="relative overflow-hidden rounded-[0.875rem]"
-      style={{ height: 188, border: `1px solid ${FIELD.line}`, background: "#eef2f6" }}
+      style={{ height: MAP_HEIGHT, border: `1px solid ${FIELD.line}`, background: "#eef2f6" }}
       data-testid="shift-map"
     >
       <img
@@ -614,6 +846,8 @@ function PreShiftState({
     <>
       <ShiftMap
         locationId={geofence.locationId}
+        center={geofence.center}
+        radiusMeters={geofence.radiusMeters}
         user={position ? { lat: position.lat, lng: position.lng } : null}
         inside={inside}
       />

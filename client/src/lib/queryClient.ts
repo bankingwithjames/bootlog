@@ -2,8 +2,36 @@ import { QueryClient, QueryFunction } from "@tanstack/react-query";
 
 const API_BASE = "__PORT_5000__".startsWith("__") ? "" : "__PORT_5000__";
 
+// In-memory auth token. localStorage/sessionStorage are blocked in the
+// sandboxed iframe, so the token lives in module state for the page lifetime.
+// AuthContext sets it on login and clears it on logout.
+let authToken: string | null = null;
+export function setAuthToken(token: string | null): void {
+  authToken = token;
+}
+export function getAuthToken(): string | null {
+  return authToken;
+}
+
+// Optional callback invoked when any request returns 401 (e.g. token expired
+// or revoked by an admin). AuthContext registers this to force a logout.
+let onUnauthorized: (() => void) | null = null;
+export function setOnUnauthorized(fn: (() => void) | null): void {
+  onUnauthorized = fn;
+}
+
+function authHeaders(base: Record<string, string> = {}): Record<string, string> {
+  const h = { ...base };
+  if (authToken) {
+    h["Authorization"] = `Bearer ${authToken}`;
+    h["X-Auth-Token"] = authToken;
+  }
+  return h;
+}
+
 async function throwIfResNotOk(res: Response) {
   if (!res.ok) {
+    if (res.status === 401 && onUnauthorized) onUnauthorized();
     const text = (await res.text()) || res.statusText;
     throw new Error(`${res.status}: ${text}`);
   }
@@ -16,7 +44,7 @@ export async function apiRequest(
 ): Promise<Response> {
   const res = await fetch(`${API_BASE}${url}`, {
     method,
-    headers: data ? { "Content-Type": "application/json" } : {},
+    headers: authHeaders(data ? { "Content-Type": "application/json" } : {}),
     body: data ? JSON.stringify(data) : undefined,
   });
 
@@ -30,7 +58,9 @@ export const getQueryFn: <T>(options: {
 }) => QueryFunction<T> =
   ({ on401: unauthorizedBehavior }) =>
   async ({ queryKey }) => {
-    const res = await fetch(`${API_BASE}${queryKey.join("/")}`);
+    const res = await fetch(`${API_BASE}${queryKey.join("/")}`, {
+      headers: authHeaders(),
+    });
 
     if (unauthorizedBehavior === "returnNull" && res.status === 401) {
       return null;

@@ -64,6 +64,7 @@ function rowToBoot(row: any): Boot {
     id: row.id,
     licensePlate: row.license_plate,
     makeModel: row.make_model,
+    color: row.color ?? null,
     bootedAt: row.booted_at,
     bootFee: row.boot_fee ?? 0,
     amountCollected: row.amount_collected ?? 0,
@@ -387,13 +388,14 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createBoot(insertBoot: InsertBoot, actor?: Actor): Promise<Boot> {
-    const { photos = [], latitude, longitude, ...rest } = insertBoot;
+    const { photos = [], latitude, longitude, color, ...rest } = insertBoot;
     const row = check(
       await supabase
         .from("boots")
         .insert({
           license_plate: rest.licensePlate,
           make_model: rest.makeModel,
+          color: color ?? null,
           booted_at: rest.bootedAt,
           boot_fee: rest.bootFee ?? 0,
           status: "booted",

@@ -42,6 +42,10 @@ import {
   EyeOff,
   MapPin,
   Crosshair,
+  Monitor,
+  Smartphone,
+  Wifi,
+  WifiOff,
 } from "lucide-react";
 
 import {
@@ -121,6 +125,9 @@ type PaidCar = {
   source?: "stripe" | "manual";
 };
 
+// Standard boot fee pre-filled on the Place-a-Boot form to save keystrokes.
+const DEFAULT_BOOT_FEE = 150;
+
 function nowLocalInput(): string {
   const d = new Date();
   const off = d.getTimezoneOffset();
@@ -193,41 +200,83 @@ type StatusMeta = {
   label: string;
   // Tailwind classes for the status badge.
   badge: string;
+  // 3px left-border accent class for enforcement table rows.
+  edge: string;
+  // Solid swatch class for compact/mobile status dots.
+  dot: string;
   icon: typeof Lock;
   // Short description shown in the queue / tooltips.
   blurb: string;
 };
 
+// Unified status color system (per ParkFlow redesign):
+//   Booted = red · Settled = amber · Completed = green · Released = blue.
+// `badge` styles the pill; `edge` is the 3px left-border accent on table rows;
+// `dot` is a small status swatch used in dense/mobile layouts.
 const STATUS_META: Record<BootStatus, StatusMeta> = {
   booted: {
     label: "Booted",
     badge:
-      "border-transparent bg-amber-500/15 text-amber-700 dark:text-amber-400",
+      "border-red-200 bg-red-500/12 text-red-700 dark:border-red-500/30 dark:text-red-400",
+    edge: "border-l-red-500",
+    dot: "bg-red-500",
     icon: Lock,
     blurb: "On boot — awaiting resolution",
   },
   released: {
     label: "Released",
     badge:
-      "border-transparent bg-slate-500/15 text-slate-700 dark:text-slate-300",
+      "border-blue-200 bg-blue-500/12 text-blue-700 dark:border-blue-500/30 dark:text-blue-400",
+    edge: "border-l-blue-500",
+    dot: "bg-blue-500",
     icon: Unlock,
     blurb: "Released for no fee",
   },
   settled: {
     label: "Settled",
     badge:
-      "border-transparent bg-blue-500/15 text-blue-700 dark:text-blue-400",
+      "border-amber-200 bg-amber-500/12 text-amber-700 dark:border-amber-500/30 dark:text-amber-400",
+    edge: "border-l-amber-500",
+    dot: "bg-amber-500",
     icon: Handshake,
     blurb: "Settled for a partial amount",
   },
   completed: {
     label: "Completed",
     badge:
-      "border-transparent bg-primary/15 text-primary hover:bg-primary/15",
+      "border-green-200 bg-green-500/12 text-green-700 dark:border-green-500/30 dark:text-green-400",
+    edge: "border-l-green-500",
+    dot: "bg-green-500",
     icon: CheckCircle2,
     blurb: "Paid in full",
   },
 };
+
+// Signature plate badge: amber-tinted monospace tag echoing a paper parking
+// ticket / Texas plate. Instantly scannable down a list. Used everywhere a
+// license plate is displayed (booted, paid, enforcement, requests, history).
+function PlateBadge({
+  plate,
+  size = "sm",
+  testid,
+}: {
+  plate: string;
+  size?: "sm" | "md";
+  testid?: string;
+}) {
+  return (
+    <span
+      className={`inline-block whitespace-nowrap rounded border border-amber-700/40 bg-amber-100 font-mono font-medium uppercase tracking-[0.15em] text-amber-950 dark:border-amber-500/40 dark:bg-amber-500/15 dark:text-amber-200 ${
+        size === "md"
+          ? "px-2.5 py-1 text-sm"
+          : "px-2 py-0.5 text-xs"
+      }`}
+      data-testid={testid}
+    >
+      {plate}
+    </span>
+  );
+}
 
 function StatusBadge({ status, testid }: { status: BootStatus; testid?: string }) {
   const meta = STATUS_META[status] ?? STATUS_META.booted;
@@ -359,6 +408,38 @@ export default function Home() {
     isAttendant ? "day" : "day",
   );
 
+  // Display mode: attendants work on phones in the field, so the dashboard
+  // auto-detects a narrow viewport and starts in mobile layout. A header
+  // toggle lets anyone force the full desktop layout (and back).
+  type ViewMode = "mobile" | "desktop";
+  const [viewMode, setViewMode] = useState<ViewMode>(() => {
+    if (typeof window !== "undefined" && window.matchMedia) {
+      return window.matchMedia("(max-width: 768px)").matches
+        ? "mobile"
+        : "desktop";
+    }
+    return "desktop";
+  });
+  // Track whether the user has manually overridden auto-detect. Until they do,
+  // we keep following the viewport so rotating / resizing stays in sync.
+  const viewModeOverridden = useRef(false);
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.matchMedia) return;
+    const mql = window.matchMedia("(max-width: 768px)");
+    const onChange = (e: MediaQueryListEvent) => {
+      if (!viewModeOverridden.current) {
+        setViewMode(e.matches ? "mobile" : "desktop");
+      }
+    };
+    mql.addEventListener("change", onChange);
+    return () => mql.removeEventListener("change", onChange);
+  }, []);
+  const isMobileView = viewMode === "mobile";
+  const toggleViewMode = () => {
+    viewModeOverridden.current = true;
+    setViewMode((m) => (m === "mobile" ? "desktop" : "mobile"));
+  };
+
   // Boot requests (attendant submits, enforcer/admin works). Everyone signed in
   // can read; the server scopes attendants to their own requests.
   const { data: requests = [], isLoading: requestsLoading } = useQuery<
@@ -380,8 +461,9 @@ export default function Home() {
     defaultValues: {
       licensePlate: "",
       makeModel: "",
+      color: "",
       bootedAt: nowLocalInput(),
-      bootFee: 0,
+      bootFee: DEFAULT_BOOT_FEE,
       photos: [],
       latitude: null,
       longitude: null,
@@ -434,8 +516,9 @@ export default function Home() {
     form.reset({
       licensePlate: "",
       makeModel: "",
+      color: "",
       bootedAt: nowLocalInput(),
-      bootFee: 0,
+      bootFee: DEFAULT_BOOT_FEE,
       photos: [],
       latitude: null,
       longitude: null,
@@ -461,8 +544,9 @@ export default function Home() {
       form.reset({
         licensePlate: "",
         makeModel: "",
+        color: "",
         bootedAt: nowLocalInput(),
-        bootFee: 0,
+        bootFee: DEFAULT_BOOT_FEE,
         photos: [],
         latitude: null,
         longitude: null,
@@ -508,8 +592,8 @@ export default function Home() {
                   <Input
                     placeholder="ABC-1234"
                     autoComplete="off"
-                    className="uppercase"
                     data-testid="input-plate"
+                    className="h-[50px] rounded-md border-amber-700/40 bg-amber-100/70 text-center font-mono text-[19px] font-bold uppercase tracking-[0.3em] text-amber-950 placeholder:tracking-normal placeholder:text-amber-800/50 focus-visible:ring-amber-600 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200 dark:placeholder:text-amber-200/40"
                     {...field}
                   />
                 </FormControl>
@@ -517,24 +601,50 @@ export default function Home() {
               </FormItem>
             )}
           />
-          <FormField
-            control={form.control}
-            name="makeModel"
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>Make &amp; Model</FormLabel>
-                <FormControl>
-                  <Input
-                    placeholder="Honda Civic"
-                    autoComplete="off"
-                    data-testid="input-makemodel"
-                    {...field}
-                  />
-                </FormControl>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
+          <div className="grid grid-cols-2 gap-3">
+            <FormField
+              control={form.control}
+              name="makeModel"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Make &amp; Model</FormLabel>
+                  <FormControl>
+                    <Input
+                      placeholder="Honda Civic"
+                      autoComplete="off"
+                      data-testid="input-makemodel"
+                      {...field}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name="color"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>
+                    Color{" "}
+                    <span className="font-normal text-muted-foreground">
+                      (optional)
+                    </span>
+                  </FormLabel>
+                  <FormControl>
+                    <Input
+                      placeholder="Silver"
+                      autoComplete="off"
+                      data-testid="input-color"
+                      {...field}
+                      value={field.value ?? ""}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          </div>
           <FormField
             control={form.control}
             name="bootedAt"
@@ -870,47 +980,141 @@ export default function Home() {
     [filteredBoots, paidPlateSet],
   );
 
+  // Stripe connectivity indicator: only "today" reads live from Stripe. Past
+  // days come from the stored snapshot, so the badge is only meaningful for
+  // today; we treat a successful live fetch as "connected".
+  const stripeLive = filterDate === todayStr && !paidError && paidSource === "live";
+
   return (
     <div className="min-h-screen bg-background text-foreground">
-      <header className="sticky top-0 z-10 border-b bg-background/80 backdrop-blur">
-        <div className="mx-auto flex max-w-6xl items-center justify-between gap-3 px-4 py-3 sm:px-6">
-          <Logo />
-          <div className="flex items-center gap-2">
+      <header className="sticky top-0 z-20 border-b border-white/10 bg-gray-900 text-gray-100 dark:bg-gray-950">
+        <div className="mx-auto flex max-w-6xl items-center justify-between gap-2 px-4 py-2.5 sm:gap-3 sm:px-6">
+          {/* Brand */}
+          <div className="flex items-center gap-2.5" data-testid="logo-header">
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-md bg-white ring-1 ring-white/20">
+              <img
+                src={logoMark}
+                alt="Millennialz Parking, LLC"
+                className="h-full w-full object-contain p-0.5"
+              />
+            </span>
+            <div className="leading-tight">
+              <span className="block text-[15px] font-bold tracking-tight text-white">
+                Daily Vehicle Inventory
+              </span>
+              <span className="block text-[11px] text-gray-400">
+                Millennialz Parking, LLC
+              </span>
+            </div>
+          </div>
+
+          {/* Status cluster */}
+          <div className="flex items-center gap-1.5 sm:gap-2">
+            {/* Stripe connectivity */}
+            <span
+              className={`hidden items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium sm:inline-flex ${
+                stripeLive
+                  ? "bg-green-500/15 text-green-300"
+                  : "bg-gray-500/20 text-gray-300"
+              }`}
+              data-testid="badge-stripe-status"
+              title={
+                stripeLive
+                  ? "Connected to Stripe (live payments)"
+                  : "Showing stored data"
+              }
+            >
+              {stripeLive ? (
+                <Wifi className="h-3.5 w-3.5" />
+              ) : (
+                <WifiOff className="h-3.5 w-3.5" />
+              )}
+              <span
+                className={`h-1.5 w-1.5 rounded-full ${
+                  stripeLive ? "bg-green-400" : "bg-gray-400"
+                }`}
+              />
+              {stripeLive ? "Live · Stripe" : "Offline"}
+            </span>
+
+            {/* Active boots */}
+            <span
+              className="inline-flex items-center gap-1.5 rounded-full bg-red-500/15 px-2.5 py-1 text-xs font-semibold text-red-300"
+              data-testid="badge-active-boots"
+              title="Active boots"
+            >
+              <Gavel className="h-3.5 w-3.5" />
+              {activeBoots.length}
+              <span className="hidden sm:inline">active</span>
+            </span>
+
+            {/* User + role */}
             {user && (
               <div
-                className="hidden items-center gap-2 rounded-md border px-2.5 py-1.5 text-sm sm:flex"
+                className="hidden items-center gap-2 rounded-full bg-white/5 py-1 pl-1 pr-2.5 text-sm sm:flex"
                 data-testid="badge-current-user"
               >
-                <span className="font-medium" data-testid="text-current-user-name">
-                  {user.name}
+                <span className="flex h-6 w-6 items-center justify-center rounded-full bg-primary text-[11px] font-bold text-primary-foreground">
+                  {user.name?.trim()?.charAt(0)?.toUpperCase() || "?"}
                 </span>
-                <Badge
-                  variant="secondary"
-                  className="gap-1"
-                  data-testid="text-current-user-role"
-                >
-                  <ShieldCheck className="h-3 w-3" />
-                  {ROLE_LABELS[user.role as Role]}
-                </Badge>
+                <span className="flex flex-col leading-none">
+                  <span
+                    className="text-[13px] font-medium text-white"
+                    data-testid="text-current-user-name"
+                  >
+                    {user.name}
+                  </span>
+                  <span
+                    className="text-[11px] text-gray-400"
+                    data-testid="text-current-user-role"
+                  >
+                    {ROLE_LABELS[user.role as Role]}
+                  </span>
+                </span>
               </div>
             )}
+
+            {/* View-mode toggle (mobile / desktop layout) */}
             <Button
-              variant="outline"
+              variant="ghost"
+              size="icon"
+              onClick={toggleViewMode}
+              aria-label={
+                isMobileView ? "Switch to desktop layout" : "Switch to mobile layout"
+              }
+              title={
+                isMobileView ? "Switch to desktop layout" : "Switch to mobile layout"
+              }
+              className="h-9 w-9 text-gray-300 hover:bg-white/10 hover:text-white"
+              data-testid="button-view-mode-toggle"
+            >
+              {isMobileView ? (
+                <Monitor className="h-4 w-4" />
+              ) : (
+                <Smartphone className="h-4 w-4" />
+              )}
+            </Button>
+
+            <Button
+              variant="ghost"
               size="icon"
               onClick={toggle}
               aria-label="Toggle dark mode"
+              className="h-9 w-9 text-gray-300 hover:bg-white/10 hover:text-white"
               data-testid="button-theme-toggle"
             >
               {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
             </Button>
             <Button
-              variant="outline"
-              size="sm"
+              variant="ghost"
+              size="icon"
               onClick={() => logout()}
+              aria-label="Sign out"
+              title="Sign out"
+              className="h-9 w-9 text-gray-300 hover:bg-white/10 hover:text-white"
               data-testid="button-logout"
             >
-              <LogOut className="mr-1.5 h-4 w-4" />
-              <span className="hidden sm:inline">Sign out</span>
+              <LogOut className="h-4 w-4" />
             </Button>
           </div>
         </div>
@@ -918,12 +1122,6 @@ export default function Home() {
 
       <main className="mx-auto max-w-6xl px-4 py-6 sm:px-6 sm:py-8">
         <section className="mb-6">
-          <h1 className="mb-1 text-xl font-bold tracking-tight">
-            Attendant Dashboard
-          </h1>
-          <p className="mb-4 text-sm text-muted-foreground">
-            A view of vehicle inventory & violations for {monthLabel}.
-          </p>
           <div
             className={`grid grid-cols-1 gap-4 sm:grid-cols-2 ${
               canSeeFinancials ? "lg:grid-cols-4" : "sm:grid-cols-1"
@@ -966,11 +1164,11 @@ export default function Home() {
 
         {/* View toggle: daily detail vs. 30-day history */}
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <div className="inline-flex rounded-md border p-0.5">
+          <div className="-mx-1 flex max-w-full items-center gap-0.5 overflow-x-auto rounded-md border p-0.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
             <Button
               variant={view === "day" ? "default" : "ghost"}
               size="sm"
-              className="h-8"
+              className="h-8 shrink-0"
               onClick={() => setView("day")}
               data-testid="button-view-day"
             >
@@ -981,7 +1179,7 @@ export default function Home() {
               <Button
                 variant={view === "enforcement" ? "default" : "ghost"}
                 size="sm"
-                className="h-8"
+                className="h-8 shrink-0"
                 onClick={() => setView("enforcement")}
                 data-testid="button-view-enforcement"
               >
@@ -989,7 +1187,11 @@ export default function Home() {
                 Enforcement
                 {activeBoots.length > 0 && (
                   <span
-                    className="ml-1.5 inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-amber-500/20 px-1.5 text-xs font-semibold text-amber-700 dark:text-amber-400"
+                    className={`ml-1.5 inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-xs font-semibold ${
+                      view === "enforcement"
+                        ? "bg-white/25 text-white"
+                        : "bg-red-500/20 text-red-700 dark:text-red-400"
+                    }`}
                     data-testid="badge-active-count"
                   >
                     {activeBoots.length}
@@ -1000,7 +1202,7 @@ export default function Home() {
             <Button
               variant={view === "requests" ? "default" : "ghost"}
               size="sm"
-              className="h-8"
+              className="h-8 shrink-0"
               onClick={() => setView("requests")}
               data-testid="button-view-requests"
             >
@@ -1018,7 +1220,7 @@ export default function Home() {
             <Button
               variant={view === "history" ? "default" : "ghost"}
               size="sm"
-              className="h-8"
+              className="h-8 shrink-0"
               onClick={() => setView("history")}
               data-testid="button-view-history"
             >
@@ -1029,7 +1231,7 @@ export default function Home() {
               <Button
                 variant={view === "users" ? "default" : "ghost"}
                 size="sm"
-                className="h-8"
+                className="h-8 shrink-0"
                 onClick={() => setView("users")}
                 data-testid="button-view-users"
               >
@@ -1097,6 +1299,7 @@ export default function Home() {
             loading={historyLoading}
             fetching={historyFetching}
             canSeeFinancials={canSeeFinancials}
+            isMobileView={isMobileView}
             onRefresh={() => refetchHistory()}
             onOpenDay={(d) => {
               setFilterDate(d);
@@ -1108,6 +1311,8 @@ export default function Home() {
             boots={boots}
             loading={isLoading}
             isPending={statusMutation.isPending}
+            canSeeFinancials={canSeeFinancials}
+            isMobileView={isMobileView}
             onSetStatus={(id, status, amountCollected) =>
               statusMutation.mutate({ id, status, amountCollected })
             }
@@ -1235,6 +1440,129 @@ export default function Home() {
                       title={`No plates match “${bootedSearch}”`}
                       subtitle="Try a different plate or clear the search."
                     />
+                  ) : isMobileView ? (
+                    /* Mobile: stacked cards — attendant-friendly, no horizontal scroll */
+                    <div className="max-h-[65vh] space-y-3 overflow-auto">
+                      {displayBoots.map((b) => {
+                        const matched = paidPlateSet.has(
+                          normalizePlate(b.licensePlate),
+                        );
+                        const status = (b.status ?? "booted") as BootStatus;
+                        return (
+                          <div
+                            key={b.id}
+                            className={`rounded-md border border-l-[3px] bg-card p-3 ${
+                              STATUS_META[status]?.edge ?? "border-l-transparent"
+                            }`}
+                            data-testid={`row-boot-${b.id}`}
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <PlateBadge
+                                plate={b.licensePlate}
+                                size="md"
+                                testid={`text-plate-${b.id}`}
+                              />
+                              <StatusBadge
+                                status={status}
+                                testid={`enforce-status-${b.id}`}
+                              />
+                            </div>
+                            <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+                              <span className="text-foreground">
+                                {b.makeModel || "—"}
+                                {b.color ? (
+                                  <span className="text-muted-foreground">
+                                    {" "}· {b.color}
+                                  </span>
+                                ) : null}
+                              </span>
+                              <span className="ml-auto whitespace-nowrap text-muted-foreground">
+                                {format(parseISO(b.bootedAt), "h:mm a")}
+                              </span>
+                            </div>
+                            {b.createdByName && (
+                              <p
+                                className="mt-0.5 text-xs text-muted-foreground"
+                                data-testid={`text-created-by-${b.id}`}
+                              >
+                                by {b.createdByName}
+                              </p>
+                            )}
+                            <div className="mt-2 flex flex-wrap items-center gap-2">
+                              {paidLoading ? (
+                                <Skeleton className="h-5 w-16" />
+                              ) : paidError ? null : matched ? (
+                                <Badge
+                                  className="gap-1 border-transparent bg-primary/15 text-primary hover:bg-primary/15"
+                                  data-testid={`status-${b.id}`}
+                                >
+                                  <CheckCircle2 className="h-3 w-3" />
+                                  Paid
+                                </Badge>
+                              ) : (
+                                <Badge
+                                  variant="destructive"
+                                  className="gap-1"
+                                  data-testid={`status-${b.id}`}
+                                >
+                                  <AlertTriangle className="h-3 w-3" />
+                                  Not Paid
+                                </Badge>
+                              )}
+                              <span className="ml-auto tabular-nums">
+                                <span className="text-muted-foreground">
+                                  {currency(b.bootFee ?? 0)}
+                                </span>
+                                {(b.amountCollected ?? 0) > 0 && (
+                                  <span className="font-semibold text-foreground">
+                                    {" "}/ {currency(b.amountCollected)}
+                                  </span>
+                                )}
+                              </span>
+                            </div>
+                            <div className="mt-2 flex items-end justify-between gap-2">
+                              <div className="flex flex-col gap-1.5">
+                                <PhotoThumbs
+                                  photos={b.photos ?? []}
+                                  bootId={b.id}
+                                  onView={(src) => setLightbox(src)}
+                                />
+                                <BootLocation
+                                  latitude={b.latitude}
+                                  longitude={b.longitude}
+                                  bootId={b.id}
+                                />
+                              </div>
+                              {can.deleteBoot && (
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-8 w-8 shrink-0 text-muted-foreground hover:text-destructive"
+                                  onClick={() => deleteMutation.mutate(b.id)}
+                                  aria-label="Delete record"
+                                  data-testid={`button-delete-${b.id}`}
+                                >
+                                  <Trash2 className="h-4 w-4" />
+                                </Button>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                      <div className="flex flex-wrap justify-end gap-x-6 border-t pt-3 text-sm">
+                        <span>
+                          <span className="text-muted-foreground">
+                            Collected ({filterLabel}):&nbsp;
+                          </span>
+                          <span
+                            className="font-semibold tabular-nums"
+                            data-testid="text-day-total"
+                          >
+                            {currency(dayFees)}
+                          </span>
+                        </span>
+                      </div>
+                    </div>
                   ) : (
                     <div className="max-h-[60vh] overflow-auto rounded-md border">
                       <Table>
@@ -1256,11 +1584,19 @@ export default function Home() {
                             const status = (b.status ?? "booted") as BootStatus;
                             return (
                               <TableRow key={b.id} data-testid={`row-boot-${b.id}`}>
-                                <TableCell className="font-mono font-semibold uppercase">
-                                  {b.licensePlate}
+                                <TableCell>
+                                  <PlateBadge
+                                    plate={b.licensePlate}
+                                    testid={`text-plate-${b.id}`}
+                                  />
                                 </TableCell>
                                 <TableCell>
                                   {b.makeModel}
+                                  {b.color ? (
+                                    <span className="ml-1.5 text-xs text-muted-foreground">
+                                      · {b.color}
+                                    </span>
+                                  ) : null}
                                   {b.createdByName && (
                                     <span
                                       className="block text-xs text-muted-foreground"
@@ -1559,7 +1895,8 @@ export default function Home() {
                       ) : (
                       <>
                       {/* Mobile: stacked cards — all info visible, no horizontal scroll */}
-                      <div className="max-h-[60vh] space-y-3 overflow-auto sm:hidden">
+                      {isMobileView && (
+                      <div className="max-h-[60vh] space-y-3 overflow-auto">
                         {displayPaidCars.map((c) => {
                           const sourceBadge =
                             c.source === "manual" ? (
@@ -1588,9 +1925,11 @@ export default function Home() {
                               data-testid={`row-paid-${c.id}`}
                             >
                               <div className="flex items-center justify-between gap-2">
-                                <span className="font-mono text-base font-semibold uppercase">
-                                  {c.licensePlate || "—"}
-                                </span>
+                                {c.licensePlate ? (
+                                  <PlateBadge plate={c.licensePlate} size="md" />
+                                ) : (
+                                  <span className="text-base text-muted-foreground">—</span>
+                                )}
                                 {sourceBadge}
                               </div>
                               <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-muted-foreground">
@@ -1608,8 +1947,10 @@ export default function Home() {
                           );
                         })}
                       </div>
+                      )}
                       {/* Desktop: full table */}
-                      <div className="hidden max-h-[60vh] overflow-auto rounded-md border sm:block">
+                      {!isMobileView && (
+                      <div className="max-h-[60vh] overflow-auto rounded-md border">
                         <Table>
                           <TableHeader className="sticky top-0 z-10 bg-card">
                             <TableRow>
@@ -1623,8 +1964,12 @@ export default function Home() {
                           <TableBody>
                             {displayPaidCars.map((c) => (
                               <TableRow key={c.id} data-testid={`row-paid-desktop-${c.id}`}>
-                                <TableCell className="font-mono font-semibold uppercase">
-                                  {c.licensePlate || "—"}
+                                <TableCell>
+                                  {c.licensePlate ? (
+                                    <PlateBadge plate={c.licensePlate} />
+                                  ) : (
+                                    <span className="text-muted-foreground">—</span>
+                                  )}
                                 </TableCell>
                                 <TableCell>{c.makeModel || "—"}</TableCell>
                                 <TableCell>{c.color || "—"}</TableCell>
@@ -1655,6 +2000,7 @@ export default function Home() {
                           </TableBody>
                         </Table>
                       </div>
+                      )}
                       </>
                       )}
                     </>
@@ -2084,6 +2430,8 @@ function EnforcementView({
   boots,
   loading,
   isPending,
+  canSeeFinancials,
+  isMobileView,
   onSetStatus,
   onOpenSettle,
   onView,
@@ -2091,6 +2439,8 @@ function EnforcementView({
   boots: Boot[];
   loading: boolean;
   isPending: boolean;
+  canSeeFinancials: boolean;
+  isMobileView: boolean;
   onSetStatus: (
     id: string,
     status: BootStatus,
@@ -2147,36 +2497,71 @@ function EnforcementView({
   return (
     <Card>
       <CardHeader className="gap-3">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-          <div>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <Gavel className="h-4 w-4 text-primary" />
-              Enforcement Queue
-            </CardTitle>
-            <CardDescription>
-              Review active boots and apply enforcement. Booted vehicles move to
-              Released, Settled, or Completed once resolved.
-            </CardDescription>
-          </div>
-          <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm text-muted-foreground">
-            <span>
-              Outstanding:{" "}
-              <strong
-                className="text-foreground tabular-nums"
+        <div>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <Gavel className="h-4 w-4 text-primary" />
+            Enforcement Queue
+          </CardTitle>
+          <CardDescription>
+            Review active boots and apply enforcement. Booted vehicles move to
+            Released, Settled, or Completed once resolved.
+          </CardDescription>
+        </div>
+        {/* Metric cards. Active count is always shown; financial figures
+            (Outstanding / Collected) are gated to admins or the staff opt-in. */}
+        <div
+          className={`grid gap-3 ${
+            canSeeFinancials ? "grid-cols-1 sm:grid-cols-3" : "grid-cols-1"
+          }`}
+        >
+          {canSeeFinancials && (
+            <div
+              className="rounded-lg border border-red-500/30 bg-red-500/5 p-3"
+              data-testid="card-outstanding"
+            >
+              <p className="flex items-center gap-1.5 text-xs font-medium text-red-700 dark:text-red-400">
+                <AlertTriangle className="h-3.5 w-3.5" />
+                Outstanding
+              </p>
+              <p
+                className="mt-1 text-xl font-bold tabular-nums text-red-700 dark:text-red-400"
                 data-testid="text-outstanding"
               >
                 {currency(outstanding)}
-              </strong>
-            </span>
-            <span>
-              Collected:{" "}
-              <strong
-                className="text-foreground tabular-nums"
+              </p>
+            </div>
+          )}
+          {canSeeFinancials && (
+            <div
+              className="rounded-lg border border-green-500/30 bg-green-500/5 p-3"
+              data-testid="card-queue-collected"
+            >
+              <p className="flex items-center gap-1.5 text-xs font-medium text-green-700 dark:text-green-400">
+                <DollarSign className="h-3.5 w-3.5" />
+                Collected
+              </p>
+              <p
+                className="mt-1 text-xl font-bold tabular-nums text-green-700 dark:text-green-400"
                 data-testid="text-queue-collected"
               >
                 {currency(collected)}
-              </strong>
-            </span>
+              </p>
+            </div>
+          )}
+          <div
+            className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3"
+            data-testid="card-active-count"
+          >
+            <p className="flex items-center gap-1.5 text-xs font-medium text-amber-700 dark:text-amber-400">
+              <Gavel className="h-3.5 w-3.5" />
+              Active boots
+            </p>
+            <p
+              className="mt-1 text-xl font-bold tabular-nums text-amber-700 dark:text-amber-400"
+              data-testid="text-active-count"
+            >
+              {counts.booted}
+            </p>
           </div>
         </div>
         <Tabs
@@ -2251,14 +2636,23 @@ function EnforcementView({
                   const status = b.status as BootStatus;
                   const active = status === "booted";
                   return (
-                    <TableRow key={b.id} data-testid={`row-enforce-${b.id}`}>
-                      <TableCell className="whitespace-nowrap font-mono font-medium uppercase">
-                        {b.licensePlate}
+                    <TableRow
+                      key={b.id}
+                      data-testid={`row-enforce-${b.id}`}
+                      className={`border-l-[3px] ${STATUS_META[status]?.edge ?? "border-l-transparent"}`}
+                    >
+                      <TableCell className="whitespace-nowrap">
+                        <PlateBadge plate={b.licensePlate} />
                       </TableCell>
                       <TableCell className="whitespace-nowrap">
                         <span className="flex items-center gap-2">
                           <Car className="h-4 w-4 shrink-0 text-muted-foreground" />
                           {b.makeModel}
+                          {b.color ? (
+                            <span className="text-xs text-muted-foreground">
+                              · {b.color}
+                            </span>
+                          ) : null}
                         </span>
                         <span className="flex items-center gap-1 text-xs text-muted-foreground">
                           <Clock className="h-3 w-3" />
@@ -2454,6 +2848,7 @@ function HistoryView({
   loading,
   fetching,
   canSeeFinancials,
+  isMobileView,
   onRefresh,
   onOpenDay,
 }: {
@@ -2462,6 +2857,7 @@ function HistoryView({
   fetching: boolean;
   // Admin-controlled gate: when false, staff see a "—" instead of fee amounts.
   canSeeFinancials: boolean;
+  isMobileView: boolean;
   onRefresh: () => void;
   onOpenDay: (day: string) => void;
 }) {
@@ -2511,7 +2907,8 @@ function HistoryView({
         ) : (
           <div>
             {/* Mobile: stacked cards — every metric visible, no horizontal scroll */}
-            <div className="max-h-[60vh] space-y-3 overflow-auto sm:hidden">
+            {isMobileView && (
+            <div className="max-h-[60vh] space-y-3 overflow-auto">
               {days.map((d) => (
                 <button
                   key={d.day}
@@ -2581,8 +2978,10 @@ function HistoryView({
                 </button>
               ))}
             </div>
+            )}
             {/* Desktop: full table */}
-            <div className="hidden max-h-[60vh] overflow-auto rounded-md border sm:block">
+            {!isMobileView && (
+            <div className="max-h-[60vh] overflow-auto rounded-md border">
             <Table>
               <TableHeader className="sticky top-0 z-10 bg-card">
                 <TableRow>
@@ -2642,9 +3041,34 @@ function HistoryView({
                     </TableCell>
                   </TableRow>
                 ))}
+                {/* Totals row — sums every visible day. */}
+                <TableRow
+                  className="sticky bottom-0 z-10 border-t-2 bg-muted/60 font-semibold hover:bg-muted/60"
+                  data-testid="row-history-totals"
+                >
+                  <TableCell className="whitespace-nowrap">
+                    {days.length >= 30 ? "30-day totals" : `${days.length}-day totals`}
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums" data-testid="text-total-booted">
+                    {totals.boots}
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums" data-testid="text-total-paid">
+                    {totals.paid}
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums" data-testid="text-total-enforcement">
+                    {totals.enforcement}
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums" data-testid="text-total-fees">
+                    {canSeeFinancials ? currency(totals.fees) : "-"}
+                  </TableCell>
+                  <TableCell />
+                </TableRow>
               </TableBody>
             </Table>
             </div>
+            )}
+            {/* Mobile totals summary (table footer is desktop-only). */}
+            {isMobileView && (
             <div className="mt-3 flex flex-wrap items-center justify-end gap-x-6 gap-y-1 border-t pt-3 text-sm text-muted-foreground">
               <span>
                 {days.length >= 30
@@ -2674,6 +3098,7 @@ function HistoryView({
                 </strong>
               </span>
             </div>
+            )}
           </div>
         )}
       </CardContent>
@@ -2922,8 +3347,8 @@ function RequestsView({
               title="No boot requests"
               subtitle={
                 canRequest
-                  ? "Submit a request using the form."
-                  : "Requests submitted by attendants will appear here."
+                  ? "Submit a request using the form. New requests appear here once sent."
+                  : "New boot requests from attendants will appear here."
               }
             />
           ) : (
@@ -2947,10 +3372,8 @@ function RequestsView({
                       >
                         <div className="flex flex-wrap items-start justify-between gap-3">
                           <div className="min-w-0">
-                            <p className="font-mono font-semibold uppercase">
-                              {r.licensePlate}
-                            </p>
-                            <p className="text-sm text-muted-foreground">
+                            <PlateBadge plate={r.licensePlate} size="md" />
+                            <p className="mt-1.5 text-sm text-muted-foreground">
                               {r.makeModel}
                             </p>
                             <p className="mt-1 flex items-center gap-1 text-xs text-muted-foreground">
@@ -3056,8 +3479,8 @@ function RequestsView({
                             key={r.id}
                             data-testid={`row-resolved-${r.id}`}
                           >
-                            <TableCell className="font-mono font-semibold uppercase">
-                              {r.licensePlate}
+                            <TableCell>
+                              <PlateBadge plate={r.licensePlate} />
                             </TableCell>
                             <TableCell>{r.makeModel}</TableCell>
                             <TableCell className="text-muted-foreground">

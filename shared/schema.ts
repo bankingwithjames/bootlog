@@ -164,6 +164,8 @@ export const boots = sqliteTable("boots", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   licensePlate: text("license_plate").notNull(),
   makeModel: text("make_model").notNull(),
+  // Optional vehicle color for quicker visual identification in the field.
+  color: text("color"),
   // ISO 8601 string for the date & time the car was booted.
   bootedAt: text("booted_at").notNull(),
   // The boot fee owed by the violator (set when the boot is placed).
@@ -216,6 +218,14 @@ export const insertBootSchema = createInsertSchema(boots)
     // Optional GPS coordinates captured client-side at placement time.
     latitude: z.number().min(-90).max(90).nullable().optional(),
     longitude: z.number().min(-180).max(180).nullable().optional(),
+    // Optional vehicle color; trimmed, empty string coerced to undefined.
+    color: z
+      .string()
+      .trim()
+      .max(40)
+      .nullable()
+      .optional()
+      .transform((v) => (v ? v : null)),
   });
 
 export type InsertBoot = z.infer<typeof insertBootSchema>;
@@ -224,6 +234,7 @@ export type Boot = Omit<typeof boots.$inferSelect, "photos"> & {
   photos: string[];
   latitude: number | null;
   longitude: number | null;
+  color: string | null;
 };
 
 // Payload for resolving / updating a boot's enforcement status.

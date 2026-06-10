@@ -291,9 +291,17 @@ export const HISTORY_VISIBLE_DAYS_MIN = 1;
 export const HISTORY_VISIBLE_DAYS_MAX = 30;
 export const HISTORY_VISIBLE_DAYS_DEFAULT = 1;
 
+// Default for the financial-visibility privacy toggle. When false (default),
+// staff (enforcer + attendant) do NOT see the financial summary cards
+// (Cars booted count, Collected total, Paid via Stripe count). Admin always
+// sees them. An admin can flip this on to reveal those cards to staff.
+export const SHOW_FINANCIALS_TO_STAFF_DEFAULT = false;
+
 // Public shape of the settings the client cares about.
 export type AppSettings = {
   historyVisibleDays: number;
+  // When true, staff may see the financial summary cards on the dashboard.
+  showFinancialsToStaff: boolean;
 };
 
 // Payload the admin sends to update settings (all fields optional).
@@ -304,5 +312,6 @@ export const updateSettingsSchema = z.object({
     .min(HISTORY_VISIBLE_DAYS_MIN, `Must be at least ${HISTORY_VISIBLE_DAYS_MIN}`)
     .max(HISTORY_VISIBLE_DAYS_MAX, `Must be at most ${HISTORY_VISIBLE_DAYS_MAX}`)
     .optional(),
+  showFinancialsToStaff: z.coerce.boolean().optional(),
 });
 export type UpdateSettingsInput = z.infer<typeof updateSettingsSchema>;

@@ -561,8 +561,10 @@ export async function registerRoutes(
 
   // ---- Manually log a paid car for a given day ----
   // POST /api/paid-cars/manual  { date, tz, licensePlate, makeModel, color }
-  // Logging a paid car: attendants, enforcers, and admins (any signed-in user).
-  app.post("/api/paid-cars/manual", requireAuth, async (req, res) => {
+  // Payments are processed by a 3rd party (Stripe). Manually logging a
+  // transaction is a financial action, so it is limited to enforcers and
+  // admins. Attendants cannot record manual payments.
+  app.post("/api/paid-cars/manual", requireRole("enforcer", "admin"), async (req, res) => {
     const parsed = manualPaidCarSchema.safeParse(req.body);
     if (!parsed.success) {
       return res

@@ -258,7 +258,7 @@ function Logo() {
         />
       </span>
       <div className="leading-tight">
-        <span className="block text-base font-bold tracking-tight">BootLog</span>
+        <span className="block text-base font-bold tracking-tight">BootLog - Daily Vehicle Inventory</span>
         <span className="block text-xs text-muted-foreground">
           Millennialz Parking, LLC
         </span>
@@ -274,10 +274,17 @@ export default function Home() {
 
   // App settings (admin-controlled). historyVisibleDays = how many days BACK
   // staff may view within the 30-day window; admin always sees all 30.
-  const { data: settings } = useQuery<{ historyVisibleDays: number }>({
+  // showFinancialsToStaff gates whether staff see the financial summary cards.
+  const { data: settings } = useQuery<{
+    historyVisibleDays: number;
+    showFinancialsToStaff: boolean;
+  }>({
     queryKey: ["/api/settings"],
   });
   const historyVisibleDays = settings?.historyVisibleDays ?? 1;
+  const showFinancialsToStaff = settings?.showFinancialsToStaff ?? false;
+  // Admins always see the financial cards. Staff only when an admin opts in.
+  const canSeeFinancials = isAdmin || showFinancialsToStaff;
   // Admins are never limited. Staff are limited to `historyVisibleDays` back.
   const visibleDaysBack = isAdmin ? 29 : historyVisibleDays;
 
@@ -655,12 +662,16 @@ export default function Home() {
       <main className="mx-auto max-w-6xl px-4 py-6 sm:px-6 sm:py-8">
         <section className="mb-6">
           <h1 className="mb-1 text-xl font-bold tracking-tight">
-            Boot Attendant Dashboard
+            Attendant Dashboard
           </h1>
           <p className="mb-4 text-sm text-muted-foreground">
             Place boots, work the enforcement queue, and collect on violations for {monthLabel}.
           </p>
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <div
+            className={`grid grid-cols-1 gap-4 sm:grid-cols-2 ${
+              canSeeFinancials ? "lg:grid-cols-4" : "sm:grid-cols-1"
+            }`}
+          >
             <StatCard
               icon={<Gavel className="h-5 w-5" />}
               label="Active enforcement"
@@ -668,24 +679,31 @@ export default function Home() {
               testid="stat-active-enforcement"
               accent={activeBoots.length > 0}
             />
-            <StatCard
-              icon={<ParkingMeter className="h-5 w-5" />}
-              label={`Cars booted · ${monthLabel}`}
-              value={isLoading ? null : String(monthly.count)}
-              testid="stat-month-count"
-            />
-            <StatCard
-              icon={<DollarSign className="h-5 w-5" />}
-              label={`Collected · ${monthLabel}`}
-              value={isLoading ? null : currency(monthly.fees)}
-              testid="stat-month-fees"
-            />
-            <StatCard
-              icon={<CreditCard className="h-5 w-5" />}
-              label={`Paid via Stripe · ${filterLabel}`}
-              value={paidLoading ? null : paidError ? "—" : String(paidCars.length)}
-              testid="stat-paid-count"
-            />
+            {/* Financial summary cards — hidden from staff unless an admin
+                has enabled "Show financial summary to staff". Admin always
+                sees these. Keeps revenue/payment counts confidential. */}
+            {canSeeFinancials && (
+              <>
+                <StatCard
+                  icon={<ParkingMeter className="h-5 w-5" />}
+                  label={`Cars booted · ${monthLabel}`}
+                  value={isLoading ? null : String(monthly.count)}
+                  testid="stat-month-count"
+                />
+                <StatCard
+                  icon={<DollarSign className="h-5 w-5" />}
+                  label={`Collected · ${monthLabel}`}
+                  value={isLoading ? null : currency(monthly.fees)}
+                  testid="stat-month-fees"
+                />
+                <StatCard
+                  icon={<CreditCard className="h-5 w-5" />}
+                  label={`Paid via Stripe · ${filterLabel}`}
+                  value={paidLoading ? null : paidError ? "—" : String(paidCars.length)}
+                  testid="stat-paid-count"
+                />
+              </>
+            )}
           </div>
         </section>
 
@@ -795,7 +813,10 @@ export default function Home() {
 
         {view === "users" && can.manageUsers ? (
           <div className="space-y-4">
-            <SettingsCard historyVisibleDays={historyVisibleDays} />
+            <SettingsCard
+              historyVisibleDays={historyVisibleDays}
+              showFinancialsToStaff={showFinancialsToStaff}
+            />
             <UsersView users={users} loading={usersLoading} currentUserId={user?.id} />
           </div>
         ) : view === "requests" ? (
@@ -991,9 +1012,6 @@ export default function Home() {
                 <Send className="mr-1.5 h-4 w-4" />
                 Go to boot requests
               </Button>
-              <p className="mt-3 text-xs text-muted-foreground">
-                You can also add paid cars on the Paid Cars tab.
-              </p>
             </CardContent>
           </Card>
           )}
@@ -1203,15 +1221,21 @@ export default function Home() {
                       <span>Payment amount intentionally hidden.</span>
                     </p>
                     <div className="flex items-center gap-2">
-                      <Button
-                        variant={showManual ? "secondary" : "default"}
-                        size="sm"
-                        onClick={() => setShowManual((s) => !s)}
-                        data-testid="button-toggle-manual"
-                      >
-                        <Plus className="mr-1.5 h-3.5 w-3.5" />
-                        Add paid car
-                      </Button>
+                      {/* Manual transaction entry is a financial action,
+                          limited to enforcers and admins (3rd-party payments
+                          are recorded here and auto-mark the matching boot
+                          as Paid). Attendants do not see this control. */}
+                      {can.logPaidCar && (
+                        <Button
+                          variant={showManual ? "secondary" : "default"}
+                          size="sm"
+                          onClick={() => setShowManual((s) => !s)}
+                          data-testid="button-toggle-manual"
+                        >
+                          <Plus className="mr-1.5 h-3.5 w-3.5" />
+                          Add paid car
+                        </Button>
+                      )}
                       <Button
                         variant="outline"
                         size="sm"
@@ -1226,7 +1250,7 @@ export default function Home() {
                   </div>
 
                   {/* Manual paid-car entry form (collapsible) */}
-                  {showManual && (
+                  {showManual && can.logPaidCar && (
                     <div
                       className="mb-4 rounded-md border bg-muted/30 p-4"
                       data-testid="form-manual"
@@ -2790,8 +2814,10 @@ type NewUserValues = z.infer<typeof newUserSchema>;
 // window; admins always see the full 30. Keeps older payment history private.
 function SettingsCard({
   historyVisibleDays,
+  showFinancialsToStaff,
 }: {
   historyVisibleDays: number;
+  showFinancialsToStaff: boolean;
 }) {
   const { toast } = useToast();
   // Local draft so the Select reflects edits before saving.
@@ -2818,6 +2844,32 @@ function SettingsCard({
       toast({
         title: "History window saved",
         description: "Staff visibility has been updated.",
+      });
+    },
+    onError: (err: Error) => {
+      toast({
+        title: "Could not save setting",
+        description: err.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  // Financial-visibility toggle. Saves immediately on flip.
+  const saveFinancials = useMutation({
+    mutationFn: async (show: boolean) => {
+      const res = await apiRequest("PATCH", "/api/settings", {
+        showFinancialsToStaff: show,
+      });
+      return res.json();
+    },
+    onSuccess: (_d, show) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/settings"] });
+      toast({
+        title: "Financial visibility saved",
+        description: show
+          ? "Staff can now see the financial summary cards."
+          : "Financial summary cards are hidden from staff.",
       });
     },
     onError: (err: Error) => {
@@ -2891,6 +2943,42 @@ function SettingsCard({
         >
           {summary}
         </p>
+
+        {/* Financial privacy toggle: hide revenue/payment cards from staff. */}
+        <div className="mt-5 border-t pt-4">
+          <div className="flex items-start justify-between gap-4">
+            <div className="space-y-1">
+              <Label
+                htmlFor="show-financials"
+                className="flex items-center gap-2 text-sm font-medium"
+              >
+                <DollarSign className="h-4 w-4 text-primary" />
+                Show financial summary to staff
+              </Label>
+              <p className="max-w-md text-sm text-muted-foreground">
+                Off by default. When off, staff (enforcers and attendants) do
+                not see the Cars booted, Collected, or Paid via Stripe summary
+                cards — keeping daily financial counts confidential. Admins
+                always see them.
+              </p>
+            </div>
+            <Switch
+              id="show-financials"
+              checked={showFinancialsToStaff}
+              disabled={saveFinancials.isPending}
+              onCheckedChange={(v) => saveFinancials.mutate(v)}
+              data-testid="switch-show-financials"
+            />
+          </div>
+          <p
+            className="mt-2 text-sm text-muted-foreground"
+            data-testid="text-financials-summary"
+          >
+            {showFinancialsToStaff
+              ? "Staff currently SEE the financial summary cards."
+              : "Staff currently do NOT see the financial summary cards (admin only)."}
+          </p>
+        </div>
       </CardContent>
     </Card>
   );
@@ -2993,7 +3081,7 @@ function UsersView({
             </CardTitle>
             <CardDescription>
               Create accounts and assign roles. Admins manage everything;
-              enforcers run enforcement; attendants log paid cars and request
+              enforcers run enforcement and log payments; attendants request
               boots.
             </CardDescription>
           </div>

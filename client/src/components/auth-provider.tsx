@@ -131,7 +131,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         enforcement: isAdmin || isEnforcer,
         workRequests: isAdmin || isEnforcer,
         deleteBoot: isAdmin,
-        logPaidCar: Boolean(role), // any signed-in user
+        logPaidCar: isAdmin || isEnforcer, // financial action: enforcers + admins only
         manageUsers: isAdmin,
       },
     };

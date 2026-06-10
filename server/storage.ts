@@ -2,6 +2,7 @@ import {
   HISTORY_VISIBLE_DAYS_DEFAULT,
   HISTORY_VISIBLE_DAYS_MIN,
   HISTORY_VISIBLE_DAYS_MAX,
+  SHOW_FINANCIALS_TO_STAFF_DEFAULT,
 } from "@shared/schema";
 import type {
   Boot,
@@ -602,13 +603,27 @@ export class DatabaseStorage implements IStorage {
     const raw = await this.getSettingValue("historyVisibleDays");
     const parsed =
       raw === undefined ? HISTORY_VISIBLE_DAYS_DEFAULT : Number(raw);
-    return { historyVisibleDays: this.clampHistoryDays(parsed) };
+    const finRaw = await this.getSettingValue("showFinancialsToStaff");
+    const showFinancialsToStaff =
+      finRaw === undefined
+        ? SHOW_FINANCIALS_TO_STAFF_DEFAULT
+        : finRaw === "true";
+    return {
+      historyVisibleDays: this.clampHistoryDays(parsed),
+      showFinancialsToStaff,
+    };
   }
 
   async updateSettings(patch: Partial<AppSettings>): Promise<AppSettings> {
     if (patch.historyVisibleDays !== undefined) {
       const clamped = this.clampHistoryDays(patch.historyVisibleDays);
       await this.setSettingValue("historyVisibleDays", String(clamped));
+    }
+    if (patch.showFinancialsToStaff !== undefined) {
+      await this.setSettingValue(
+        "showFinancialsToStaff",
+        patch.showFinancialsToStaff ? "true" : "false",
+      );
     }
     return this.getSettings();
   }

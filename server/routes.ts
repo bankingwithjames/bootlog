@@ -37,6 +37,7 @@ import {
   notifyShiftCheckIn,
   notifyShiftCheckOut,
   notifyReleaseRequest,
+  notifyBootRequest,
 } from "./sms";
 import {
   attachUser,
@@ -700,6 +701,21 @@ export async function registerRoutes(
           .json({ message: fromZodError(parsed.error).toString() });
       }
       const reqRow = await storage.createBootRequest(parsed.data, actorOf(req)!);
+      // Stubbed SMS to the on-duty enforcer (real provider wired later). The
+      // boot-request table doesn't carry a locationId, so we resolve the lot
+      // name from the requesting attendant's assigned location(s).
+      const allowed = await allowedLocationIds(req);
+      const locName =
+        allowed && allowed.length
+          ? (await storage.getLocations()).find((l) => l.id === allowed[0])
+              ?.name
+          : undefined;
+      notifyBootRequest({
+        plate: reqRow.licensePlate,
+        makeModel: reqRow.makeModel,
+        byName: actorOf(req)!.name,
+        locationName: locName,
+      });
       res.status(201).json(reqRow);
     },
   );

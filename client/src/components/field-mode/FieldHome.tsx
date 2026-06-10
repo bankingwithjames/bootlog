@@ -13,6 +13,7 @@ import {
 import { FieldShift } from "./FieldShift";
 import { FieldAddVehicle } from "./FieldAddVehicle";
 import { FieldInventory } from "./FieldInventory";
+import { FieldRequestBoot } from "./FieldRequestBoot";
 
 // Minimal shape of a paid car (from /api/paid-cars). Field Mode only needs the
 // plate for cross-reference and counting; full type lives in home.tsx.
@@ -622,6 +623,19 @@ export function FieldMode({
     );
   }
 
+  // "Request a Boot" is a full-screen 3-step takeover (its own dark header +
+  // step progress), rendered ABOVE the shell. Matches the approved page5
+  // mockup. Returning early keeps the tab bar / header hidden.
+  if (view === "request") {
+    return (
+      <FieldRequestBoot
+        assignedLot={assignedLot}
+        onClose={() => setView("home")}
+        onViewInventory={() => setView("inventory")}
+      />
+    );
+  }
+
   // Header shift bar label, derived from real shift state.
   const shiftLabel = onShift
     ? `On shift · since ${shiftStartLabel(activeShift!.checkInAt)}`
@@ -677,7 +691,8 @@ export function FieldMode({
       {view !== "home" &&
         view !== "shift" &&
         view !== "inventory" &&
-        view !== "add" && (
+        view !== "add" &&
+        view !== "request" && (
           <FieldStub view={view} onBack={() => setView("home")} />
         )}
     </FieldShell>

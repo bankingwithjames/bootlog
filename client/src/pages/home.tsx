@@ -68,6 +68,7 @@ import {
   type LocationWithStaff,
 } from "@shared/schema";
 import { apiRequest, queryClient } from "@/lib/queryClient";
+import { FieldMode } from "@/components/field-mode/FieldHome";
 import { useTheme } from "@/components/theme-provider";
 import { useAuth } from "@/components/auth-provider";
 import { useToast } from "@/hooks/use-toast";
@@ -1147,6 +1148,23 @@ export default function Home() {
   // days come from the stored snapshot, so the badge is only meaningful for
   // today; we treat a successful live fetch as "connected".
   const stripeLive = filterDate === todayStr && !paidError && paidSource === "live";
+
+  // Attendant Field Mode (Page 1): a dedicated mobile home for attendants only.
+  // Gated behind isAttendant && isMobileView so admin/enforcer chrome and the
+  // desktop layout stay byte-for-byte unchanged. All hooks above still run, so
+  // this early return is safe (no conditional hooks).
+  if (isAttendant && isMobileView) {
+    return (
+      <FieldMode
+        userName={user?.name ?? "Attendant"}
+        boots={boots}
+        paidCars={paidCars}
+        locations={locations}
+        myLocationIds={myLocationIds}
+        canSeeFinancials={canSeeFinancials}
+      />
+    );
+  }
 
   return (
     <div className="min-h-screen bg-background text-foreground">

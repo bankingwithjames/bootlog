@@ -686,7 +686,7 @@ export default function Home() {
             Attendant Dashboard
           </h1>
           <p className="mb-4 text-sm text-muted-foreground">
-            Place boots, work the enforcement queue, and collect on violations for {monthLabel}.
+            A view of vehicle inventory & violations for {monthLabel}.
           </p>
           <div
             className={`grid grid-cols-1 gap-4 sm:grid-cols-2 ${
@@ -860,6 +860,7 @@ export default function Home() {
             days={historyDays}
             loading={historyLoading}
             fetching={historyFetching}
+            canSeeFinancials={canSeeFinancials}
             onRefresh={() => refetchHistory()}
             onOpenDay={(d) => {
               setFilterDate(d);
@@ -1536,10 +1537,6 @@ export default function Home() {
         </div>
         )}
 
-        <p className="mt-6 text-center text-xs text-muted-foreground">
-          Boots move through Booted → Released / Settled / Completed. Paid-car
-          data is read live from your Stripe account and stored for 30 days.
-        </p>
       </main>
 
       {/* Settle-for-less dialog: capture the partial amount collected. */}
@@ -2257,12 +2254,15 @@ function HistoryView({
   days,
   loading,
   fetching,
+  canSeeFinancials,
   onRefresh,
   onOpenDay,
 }: {
   days: HistoryDay[];
   loading: boolean;
   fetching: boolean;
+  // Admin-controlled gate: when false, staff see a "—" instead of fee amounts.
+  canSeeFinancials: boolean;
   onRefresh: () => void;
   onOpenDay: (day: string) => void;
 }) {
@@ -2371,7 +2371,11 @@ function HistoryView({
                         Fees
                       </div>
                       <div className="text-sm font-semibold tabular-nums">
-                        {d.fees > 0 ? currency(d.fees) : "—"}
+                        {!canSeeFinancials
+                          ? "-"
+                          : d.fees > 0
+                            ? currency(d.fees)
+                            : "—"}
                       </div>
                     </div>
                   </div>
@@ -2428,7 +2432,11 @@ function HistoryView({
                       )}
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
-                      {d.fees > 0 ? currency(d.fees) : "—"}
+                      {!canSeeFinancials
+                        ? "-"
+                        : d.fees > 0
+                          ? currency(d.fees)
+                          : "—"}
                     </TableCell>
                     <TableCell>
                       <ChevronRight className="h-4 w-4 text-muted-foreground" />
@@ -2463,7 +2471,7 @@ function HistoryView({
               <span>
                 Fees:{" "}
                 <strong className="text-foreground tabular-nums">
-                  {currency(totals.fees)}
+                  {canSeeFinancials ? currency(totals.fees) : "-"}
                 </strong>
               </span>
             </div>

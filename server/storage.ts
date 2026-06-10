@@ -14,6 +14,10 @@ import type {
   BootRequest,
   InsertBootRequest,
   AppSettings,
+  Location,
+  LocationWithStaff,
+  InsertLocation,
+  UpdateLocationInput,
 } from "@shared/schema";
 import { supabase } from "./supabase";
 import { hashPassword } from "./auth";
@@ -78,7 +82,19 @@ function rowToBoot(row: any): Boot {
     lastActionById: row.last_action_by_id ?? null,
     lastActionByName: row.last_action_by_name ?? null,
     feePaid: row.fee_paid ?? 0,
+    locationId: row.location_id ?? null,
   } as Boot;
+}
+
+function rowToLocation(row: any): Location {
+  return {
+    id: row.id,
+    name: row.name,
+    address: row.address ?? "",
+    color: row.color ?? "#378ADD",
+    active: Boolean(row.active),
+    createdAt: row.created_at,
+  } as Location;
 }
 
 function rowToRequest(row: any): BootRequest {
@@ -155,6 +171,16 @@ export interface IStorage {
     actor?: Actor,
   ): Promise<Boot | undefined>;
   deleteBoot(id: number): Promise<{ changes: number }>;
+  // Parking locations (multi-location support)
+  getLocations(): Promise<LocationWithStaff[]>;
+  createLocation(input: InsertLocation): Promise<LocationWithStaff>;
+  updateLocation(
+    id: number,
+    patch: UpdateLocationInput,
+  ): Promise<LocationWithStaff | undefined>;
+  // Staff<->location assignments
+  getLocationIdsForUser(userId: number): Promise<number[]>;
+  setStaffForLocation(locationId: number, staffIds: number[]): Promise<void>;
   // Boot requests
   getBootRequests(): Promise<BootRequest[]>;
   getBootRequest(id: number): Promise<BootRequest | undefined>;
@@ -388,7 +414,8 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createBoot(insertBoot: InsertBoot, actor?: Actor): Promise<Boot> {
-    const { photos = [], latitude, longitude, color, ...rest } = insertBoot;
+    const { photos = [], latitude, longitude, color, locationId, ...rest } =
+      insertBoot;
     const row = check(
       await supabase
         .from("boots")
@@ -409,6 +436,7 @@ export class DatabaseStorage implements IStorage {
           last_action_by_id: actor?.id ?? null,
           last_action_by_name: actor?.name ?? null,
           fee_paid: 0,
+          location_id: locationId ?? null,
         })
         .select("*")
         .single(),
@@ -447,6 +475,129 @@ export class DatabaseStorage implements IStorage {
       "deleteBoot",
     );
     return { changes: (rows ?? []).length };
+  }
+
+  // ---- Parking locations ----
+  // Pull all staff_locations rows once and group userIds per locationId so we
+  // can attach an assigned-staff list to each location without N+1 queries.
+  private async staffByLocation(): Promise<Map<number, number[]>> {
+    const rows = check(
+      await supabase.from("staff_locations").select("user_id, location_id"),
+      "staffByLocation",
+    );
+    const map = new Map<number, number[]>();
+    for (const r of rows ?? []) {
+      const list = map.get(r.location_id) ?? [];
+      list.push(r.user_id);
+      map.set(r.location_id, list);
+    }
+    return map;
+  }
+
+  async getLocations(): Promise<LocationWithStaff[]> {
+    const rows = check(
+      await supabase
+        .from("locations")
+        .select("*")
+        .order("created_at", { ascending: true }),
+      "getLocations",
+    );
+    const staffMap = await this.staffByLocation();
+    return (rows ?? []).map((row) => ({
+      ...rowToLocation(row),
+      staffIds: staffMap.get(row.id) ?? [],
+    }));
+  }
+
+  async createLocation(input: InsertLocation): Promise<LocationWithStaff> {
+    const { staffIds = [], ...rest } = input;
+    const row = check(
+      await supabase
+        .from("locations")
+        .insert({
+          name: rest.name,
+          address: rest.address ?? "",
+          color: rest.color ?? "#378ADD",
+          active: true,
+          created_at: new Date().toISOString(),
+        })
+        .select("*")
+        .single(),
+      "createLocation",
+    );
+    await this.setStaffForLocation(row.id, staffIds);
+    return { ...rowToLocation(row), staffIds: [...staffIds] };
+  }
+
+  async updateLocation(
+    id: number,
+    patch: UpdateLocationInput,
+  ): Promise<LocationWithStaff | undefined> {
+    const set: Record<string, unknown> = {};
+    if (patch.name !== undefined) set.name = patch.name;
+    if (patch.address !== undefined) set.address = patch.address;
+    if (patch.color !== undefined) set.color = patch.color;
+    if (patch.active !== undefined) set.active = patch.active;
+    let row: any;
+    if (Object.keys(set).length > 0) {
+      const rows = check(
+        await supabase.from("locations").update(set).eq("id", id).select("*"),
+        "updateLocation",
+      );
+      row = (rows ?? [])[0];
+      if (!row) return undefined;
+    } else {
+      const rows = check(
+        await supabase.from("locations").select("*").eq("id", id).limit(1),
+        "updateLocation/fetch",
+      );
+      row = (rows ?? [])[0];
+      if (!row) return undefined;
+    }
+    if (patch.staffIds !== undefined) {
+      await this.setStaffForLocation(id, patch.staffIds);
+    }
+    const staffMap = await this.staffByLocation();
+    return { ...rowToLocation(row), staffIds: staffMap.get(id) ?? [] };
+  }
+
+  // ---- Staff <-> location assignments ----
+  async getLocationIdsForUser(userId: number): Promise<number[]> {
+    const rows = check(
+      await supabase
+        .from("staff_locations")
+        .select("location_id")
+        .eq("user_id", userId),
+      "getLocationIdsForUser",
+    );
+    return (rows ?? []).map((r) => r.location_id);
+  }
+
+  // Replace the full set of staff assigned to a location (delete-then-insert;
+  // there is no unique constraint, so we clear the location's rows first).
+  async setStaffForLocation(
+    locationId: number,
+    staffIds: number[],
+  ): Promise<void> {
+    check(
+      await supabase
+        .from("staff_locations")
+        .delete()
+        .eq("location_id", locationId)
+        .select("id"),
+      "setStaffForLocation/delete",
+    );
+    const unique = Array.from(new Set(staffIds)).filter((n) =>
+      Number.isInteger(n),
+    );
+    if (unique.length === 0) return;
+    check(
+      await supabase
+        .from("staff_locations")
+        .insert(unique.map((uid) => ({ user_id: uid, location_id: locationId })))
+        .select("id"),
+      "setStaffForLocation/insert",
+    );
   }
 
   // ---- Paid-car snapshots ----

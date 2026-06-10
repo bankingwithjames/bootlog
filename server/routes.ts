@@ -18,6 +18,8 @@ import {
   insertBootRequestSchema,
   resolveBootRequestSchema,
   updateSettingsSchema,
+  insertLocationSchema,
+  updateLocationSchema,
   type PaidSnapshot,
 } from "@shared/schema";
 import { fromZodError } from "zod-validation-error";
@@ -90,6 +92,16 @@ async function staffVisibleCutoffDay(
   if (!req.user || req.user.role === "admin") return null;
   const { historyVisibleDays } = await storage.getSettings();
   return dayMinus(todayKey(tz), historyVisibleDays);
+}
+
+// Resolve which location ids a request's user is allowed to see/act on.
+//   - admin -> null (no restriction; sees all locations)
+//   - staff -> the set of location ids assigned to them in staff_locations
+// Staff are additionally always allowed to see untagged boots (location_id
+// null) so pre-existing records and "No location" picks stay visible.
+async function allowedLocationIds(req: Request): Promise<number[] | null> {
+  if (!req.user || req.user.role === "admin") return null;
+  return storage.getLocationIdsForUser(req.user.id);
 }
 
 // Map a stored snapshot row to the PaidCar shape the frontend expects.
@@ -342,6 +354,56 @@ export async function registerRoutes(
     res.json(updated);
   });
 
+  // ---- Parking locations (multi-location support) ----
+  // GET /api/locations -> all locations with assigned-staff ids. Any signed-in
+  // user can read (staff need it for the boot-form picker and labels); the
+  // frontend gates the management UI to admins.
+  app.get("/api/locations", requireAuth, async (_req, res) => {
+    res.json(await storage.getLocations());
+  });
+
+  // GET /api/locations/mine -> the location ids assigned to the current user
+  // (admins get all active location ids). Drives the boot-form default and
+  // staff scoping on the client.
+  app.get("/api/locations/mine", requireAuth, async (req, res) => {
+    const me = req.user!;
+    if (me.role === "admin") {
+      const all = await storage.getLocations();
+      return res.json({
+        locationIds: all.filter((l) => l.active).map((l) => l.id),
+      });
+    }
+    res.json({ locationIds: await storage.getLocationIdsForUser(me.id) });
+  });
+
+  // POST /api/locations { name, address?, color?, staffIds? } -> create (admin)
+  app.post("/api/locations", requireRole("admin"), async (req, res) => {
+    const parsed = insertLocationSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res
+        .status(400)
+        .json({ message: fromZodError(parsed.error).toString() });
+    }
+    const loc = await storage.createLocation(parsed.data);
+    res.status(201).json(loc);
+  });
+
+  // PATCH /api/locations/:id { name?, address?, color?, active?, staffIds? }
+  // Update a location and/or its staff assignment (admin only).
+  app.patch("/api/locations/:id", requireRole("admin"), async (req, res) => {
+    const id = Number(req.params.id);
+    if (Number.isNaN(id)) return res.status(400).json({ message: "Invalid id" });
+    const parsed = updateLocationSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res
+        .status(400)
+        .json({ message: fromZodError(parsed.error).toString() });
+    }
+    const updated = await storage.updateLocation(id, parsed.data);
+    if (!updated) return res.status(404).json({ message: "Location not found" });
+    res.json(updated);
+  });
+
   // ---- Boot requests ----
   // List: any signed-in user can see the queue.
   app.get("/api/boot-requests", requireAuth, async (_req, res) => {
@@ -405,9 +467,11 @@ export async function registerRoutes(
         {
           licensePlate: reqRow.licensePlate,
           makeModel: reqRow.makeModel,
+          color: null,
           bootedAt: new Date().toISOString(),
           bootFee: fee,
           photos: reqRow.photos,
+          locationId: null,
         },
         actorOf(req)!,
       );
@@ -427,7 +491,17 @@ export async function registerRoutes(
   app.get("/api/boots", requireAuth, async (req, res) => {
     // tz offset (minutes) so day boundaries match the user's local day.
     const tz = Number(req.query.tz ?? 0) || 0;
-    const boots = await storage.getBoots();
+    let boots = await storage.getBoots();
+    // Location scoping: staff only see boots at their assigned locations, plus
+    // untagged boots (location_id null) so pre-existing records stay visible.
+    // Admins (allowed === null) see everything.
+    const allowed = await allowedLocationIds(req);
+    if (allowed) {
+      const allowedSet = new Set(allowed);
+      boots = boots.filter(
+        (b) => b.locationId == null || allowedSet.has(b.locationId),
+      );
+    }
     const cutoff = await staffVisibleCutoffDay(req, tz);
     if (cutoff) {
       const visible = boots.filter(
@@ -448,6 +522,17 @@ export async function registerRoutes(
         return res
           .status(400)
           .json({ message: fromZodError(parsed.error).toString() });
+      }
+      // Location scoping: staff may only place boots at a location assigned to
+      // them (or leave it untagged). Admins may place at any location.
+      const locationId = parsed.data.locationId ?? null;
+      if (locationId != null) {
+        const allowed = await allowedLocationIds(req);
+        if (allowed && !allowed.includes(locationId)) {
+          return res.status(403).json({
+            message: "You aren't assigned to that parking location.",
+          });
+        }
       }
       const boot = await storage.createBoot(parsed.data, actorOf(req));
       res.status(201).json(boot);
@@ -639,6 +724,18 @@ export async function registerRoutes(
   // from the local DB. Enforcement = booted plates with no matching payment.
   app.get("/api/history", requireAuth, async (req, res) => {
     const tz = Number(req.query.tz ?? 0) || 0;
+    // Optional per-location filter. `locationId=none` narrows to untagged
+    // boots; a numeric id narrows to that location; omitted = all locations.
+    const rawLoc = req.query.locationId;
+    const locFilter:
+      | { kind: "all" }
+      | { kind: "none" }
+      | { kind: "id"; id: number } =
+      rawLoc == null || rawLoc === ""
+        ? { kind: "all" }
+        : rawLoc === "none"
+          ? { kind: "none" }
+          : { kind: "id", id: Number(rawLoc) };
     try {
       await pruneRetention(tz);
 
@@ -662,8 +759,22 @@ export async function registerRoutes(
         days.push(dt.toISOString().slice(0, 10));
       }
 
-      // Boots grouped by local day + their normalized plates.
-      const boots = await storage.getBoots();
+      // Boots grouped by local day + their normalized plates. Staff history is
+      // scoped to their assigned locations (plus untagged); admins see all.
+      let boots = await storage.getBoots();
+      const allowedHist = await allowedLocationIds(req);
+      if (allowedHist) {
+        const allowedSet = new Set(allowedHist);
+        boots = boots.filter(
+          (b) => b.locationId == null || allowedSet.has(b.locationId),
+        );
+      }
+      // Apply the optional per-location filter on top of access scoping.
+      if (locFilter.kind === "none") {
+        boots = boots.filter((b) => b.locationId == null);
+      } else if (locFilter.kind === "id" && Number.isFinite(locFilter.id)) {
+        boots = boots.filter((b) => b.locationId === locFilter.id);
+      }
       const bootsByDay = new Map<
         string,
         { count: number; fees: number; plates: Set<string> }

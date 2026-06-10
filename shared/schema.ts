@@ -90,6 +90,80 @@ export const changePasswordSchema = z.object({
 export type ChangePasswordInput = z.infer<typeof changePasswordSchema>;
 
 // ---------------------------------------------------------------------------
+// Parking locations (multi-location support)
+// ---------------------------------------------------------------------------
+// A parking lot / garage the business enforces. Boots can be tagged to a
+// location, staff are assigned to one or more locations (functional access
+// control), and admins manage the location list. Each location carries a
+// color used as a visual key across the per-location overview and history.
+export const LOCATION_COLORS = [
+  "#378ADD", // blue
+  "#1D9E75", // green
+  "#7F77DD", // purple
+  "#E8560A", // brand orange
+  "#D9890F", // amber
+  "#C0392B", // red
+  "#0E7C7B", // teal
+  "#8E44AD", // violet
+] as const;
+
+export const locations = sqliteTable("locations", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(),
+  // Optional street address shown in management + overview cards.
+  address: text("address").notNull().default(""),
+  // Hex color used as the location's visual key (dot/top-border).
+  color: text("color").notNull().default("#378ADD"),
+  // Soft-disable: inactive locations are retained but not offered for new
+  // boots and shown as Inactive in management.
+  active: integer("active", { mode: "boolean" }).notNull().default(true),
+  createdAt: text("created_at").notNull(),
+});
+
+export type Location = typeof locations.$inferSelect;
+
+// Staff <-> location assignment (functional access control). A row means the
+// user may see/place boots at that location. Admins implicitly see all.
+export const staffLocations = sqliteTable("staff_locations", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull(),
+  locationId: integer("location_id").notNull(),
+});
+
+export type StaffLocation = typeof staffLocations.$inferSelect;
+
+// Admin creates/edits a location. Color is optional (server picks a default
+// from LOCATION_COLORS when omitted). staffIds assigns staff in one call.
+export const insertLocationSchema = z.object({
+  name: z.string().trim().min(1, "Location name is required").max(80),
+  address: z.string().trim().max(160).optional().default(""),
+  color: z
+    .string()
+    .trim()
+    .regex(/^#[0-9a-fA-F]{6}$/, "Color must be a hex value")
+    .optional(),
+  staffIds: z.array(z.coerce.number().int()).optional().default([]),
+});
+export type InsertLocation = z.infer<typeof insertLocationSchema>;
+
+export const updateLocationSchema = z.object({
+  name: z.string().trim().min(1).max(80).optional(),
+  address: z.string().trim().max(160).optional(),
+  color: z
+    .string()
+    .trim()
+    .regex(/^#[0-9a-fA-F]{6}$/, "Color must be a hex value")
+    .optional(),
+  active: z.boolean().optional(),
+  // When provided, replaces the location's full staff-assignment set.
+  staffIds: z.array(z.coerce.number().int()).optional(),
+});
+export type UpdateLocationInput = z.infer<typeof updateLocationSchema>;
+
+// Location enriched with its assigned staff ids (returned by the API).
+export type LocationWithStaff = Location & { staffIds: number[] };
+
+// ---------------------------------------------------------------------------
 // Boot requests (attendant -> enforcer queue)
 // ---------------------------------------------------------------------------
 // An attendant flags a vehicle for booting. It lands in a pending queue an
@@ -191,6 +265,10 @@ export const boots = sqliteTable("boots", {
   lastActionByName: text("last_action_by_name"),
   // Legacy column kept for backward compatibility; no longer written.
   feePaid: real("fee_paid").notNull().default(0),
+  // Parking location this boot belongs to (multi-location support). Nullable:
+  // boots placed before locations existed (and "No location" picks) stay null
+  // and are excluded from per-location enforcement overview counts.
+  locationId: integer("location_id"),
 });
 
 export const insertBootSchema = createInsertSchema(boots)
@@ -226,6 +304,8 @@ export const insertBootSchema = createInsertSchema(boots)
       .nullable()
       .optional()
       .transform((v) => (v ? v : null)),
+    // Optional parking location id; null means "No location".
+    locationId: z.coerce.number().int().nullable().optional(),
   });
 
 export type InsertBoot = z.infer<typeof insertBootSchema>;
@@ -235,6 +315,7 @@ export type Boot = Omit<typeof boots.$inferSelect, "photos"> & {
   latitude: number | null;
   longitude: number | null;
   color: string | null;
+  locationId: number | null;
 };
 
 // Payload for resolving / updating a boot's enforcement status.

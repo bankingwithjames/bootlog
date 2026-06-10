@@ -8,6 +8,7 @@ import logoMark from "@assets/logo-mark.png";
 import {
   Car,
   Plus,
+  BarChart3,
   Trash2,
   Camera,
   X,
@@ -52,6 +53,8 @@ import {
   insertBootSchema,
   insertBootRequestSchema,
   createUserSchema,
+  insertLocationSchema,
+  LOCATION_COLORS,
   MAX_BOOT_PHOTOS,
   ROLES,
   ROLE_LABELS,
@@ -62,6 +65,7 @@ import {
   type Role,
   type InsertBootRequest,
   type CreateUserInput,
+  type LocationWithStaff,
 } from "@shared/schema";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useTheme } from "@/components/theme-provider";
@@ -114,6 +118,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import { Checkbox } from "@/components/ui/checkbox";
 
 // ---------- helpers ----------
 type PaidCar = {
@@ -194,6 +199,68 @@ const formSchema = insertBootSchema.extend({
   bootFee: z.coerce.number().min(0, "Fee can't be negative"),
 });
 type FormValues = z.infer<typeof formSchema>;
+
+// ---------- parking location helpers ----------
+// Sentinel used in the boot-form Select for the "No location" option (an empty
+// string is not a valid SelectItem value).
+const NO_LOCATION = "none";
+
+// First-letter avatar initial for an assigned-staff chip.
+function initialOf(name: string): string {
+  const t = (name || "").trim();
+  return t ? t[0].toUpperCase() : "?";
+}
+
+// Deterministic avatar background derived from a user id so the same staffer
+// always gets the same chip color across locations.
+function avatarColor(userId: number): string {
+  return LOCATION_COLORS[userId % LOCATION_COLORS.length];
+}
+
+// Small colored location dot used in tables, cards, and pickers.
+function LocationDot({ color, size = 10 }: { color: string; size?: number }) {
+  return (
+    <span
+      className="inline-block shrink-0 rounded-full"
+      style={{ width: size, height: size, background: color }}
+      aria-hidden="true"
+    />
+  );
+}
+
+// Assigned-staff avatar chips for a location row.
+function StaffChips({
+  staffIds,
+  users,
+}: {
+  staffIds: number[];
+  users: User[];
+}) {
+  const byId = new Map(users.map((u) => [u.id, u]));
+  const assigned = staffIds
+    .map((id) => byId.get(id))
+    .filter((u): u is User => Boolean(u));
+  if (assigned.length === 0) {
+    return (
+      <span className="text-xs text-muted-foreground">None</span>
+    );
+  }
+  return (
+    <div className="flex flex-wrap gap-1">
+      {assigned.map((u) => (
+        <span
+          key={u.id}
+          title={u.name}
+          className="flex h-5 w-5 items-center justify-center rounded-full text-[9px] font-medium text-white"
+          style={{ background: avatarColor(u.id) }}
+          data-testid={`avatar-staff-${u.id}`}
+        >
+          {initialOf(u.name)}
+        </span>
+      ))}
+    </div>
+  );
+}
 
 // ---------- enforcement status helpers ----------
 type StatusMeta = {
@@ -386,16 +453,25 @@ export default function Home() {
   const paidCars = paidData?.cars ?? [];
   const paidSource = paidData?.source ?? "live";
 
-  // 30-day history (per-day boot / paid / enforcement counts).
+  // 30-Day History location filter: "all" | "none" (untagged) | a location id.
+  const [historyLocation, setHistoryLocation] = useState<string>("all");
+
+  // 30-day history (per-day boot / paid / enforcement counts), optionally
+  // narrowed to a single parking location.
   const {
     data: historyData,
     isLoading: historyLoading,
     refetch: refetchHistory,
     isFetching: historyFetching,
   } = useQuery<{ days: HistoryDay[] }>({
-    queryKey: ["/api/history", TZ_OFFSET],
+    queryKey: ["/api/history", TZ_OFFSET, historyLocation],
     queryFn: async () => {
-      const res = await apiRequest("GET", `/api/history?tz=${TZ_OFFSET}`);
+      const locParam =
+        historyLocation === "all" ? "" : `&locationId=${historyLocation}`;
+      const res = await apiRequest(
+        "GET",
+        `/api/history?tz=${TZ_OFFSET}${locParam}`,
+      );
       return res.json();
     },
   });
@@ -403,7 +479,13 @@ export default function Home() {
 
   // Top-level view: day detail, the enforcement queue, the 30-day history,
   // the boot-request queue, or (admin only) user management.
-  type View = "day" | "enforcement" | "history" | "requests" | "users";
+  type View =
+    | "day"
+    | "enforcement"
+    | "history"
+    | "requests"
+    | "locations"
+    | "users";
   const [view, setView] = useState<View>(
     isAttendant ? "day" : "day",
   );
@@ -456,6 +538,29 @@ export default function Home() {
     enabled: can.manageUsers,
   });
 
+  // Parking locations (with assigned-staff ids). Everyone signed in can read;
+  // the server returns every location so admins can manage them and staff can
+  // resolve location names/colors for the boots they're allowed to see.
+  const { data: locations = [], isLoading: locationsLoading } = useQuery<
+    LocationWithStaff[]
+  >({ queryKey: ["/api/locations"] });
+
+  // The location ids the signed-in user may place boots at. Admins get every
+  // active location; staff get only their assigned locations. Drives the boot
+  // form's default selection and access scoping in the UI.
+  const { data: mineData } = useQuery<{ locationIds: number[] }>({
+    queryKey: ["/api/locations/mine"],
+  });
+  const myLocationIds = mineData?.locationIds ?? [];
+  // Quick lookup from location id → location record for dots / names.
+  const locationById = useMemo(
+    () => new Map(locations.map((l) => [l.id, l])),
+    [locations],
+  );
+  // The location to preselect on a fresh boot form: the staffer's first
+  // assigned location, else "No location".
+  const defaultLocationId = myLocationIds.length > 0 ? myLocationIds[0] : null;
+
   const form = useForm<FormValues>({
     resolver: zodResolver(formSchema),
     defaultValues: {
@@ -467,6 +572,7 @@ export default function Home() {
       photos: [],
       latitude: null,
       longitude: null,
+      locationId: null,
     },
   });
 
@@ -522,6 +628,7 @@ export default function Home() {
       photos: [],
       latitude: null,
       longitude: null,
+      locationId: defaultLocationId,
     });
     setGeoStatus("idle");
     setGeoError(null);
@@ -550,6 +657,7 @@ export default function Home() {
         photos: [],
         latitude: null,
         longitude: null,
+        locationId: defaultLocationId,
       });
       setGeoStatus("idle");
       setGeoError(null);
@@ -687,6 +795,61 @@ export default function Home() {
                 <FormMessage />
               </FormItem>
             )}
+          />
+          {/* Parking location picker. Staff see only the lots they're assigned
+              to (plus "No location"); admins see every active lot. Defaults to
+              the staffer's first assigned lot via the form's defaultValues. */}
+          <FormField
+            control={form.control}
+            name="locationId"
+            render={({ field }) => {
+              // Lots the signed-in user may file a boot under.
+              const pickable = locations.filter(
+                (l) =>
+                  l.active &&
+                  (isAdmin || myLocationIds.includes(l.id)),
+              );
+              return (
+                <FormItem>
+                  <FormLabel>
+                    Parking Location{" "}
+                    <span className="font-normal text-muted-foreground">
+                      (optional)
+                    </span>
+                  </FormLabel>
+                  <Select
+                    value={
+                      field.value == null ? NO_LOCATION : String(field.value)
+                    }
+                    onValueChange={(v) =>
+                      field.onChange(v === NO_LOCATION ? null : Number(v))
+                    }
+                  >
+                    <FormControl>
+                      <SelectTrigger data-testid="select-boot-location">
+                        <SelectValue placeholder="No location" />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent>
+                      <SelectItem value={NO_LOCATION}>No location</SelectItem>
+                      {pickable.map((l) => (
+                        <SelectItem
+                          key={l.id}
+                          value={String(l.id)}
+                          data-testid={`option-boot-location-${l.id}`}
+                        >
+                          <span className="flex items-center gap-2">
+                            <LocationDot color={l.color} />
+                            {l.name}
+                          </span>
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <FormMessage />
+                </FormItem>
+              );
+            }}
           />
           <FormField
             control={form.control}
@@ -1227,6 +1390,18 @@ export default function Home() {
               <HistoryIcon className="mr-1.5 h-4 w-4" />
               30-Day History
             </Button>
+            {isAdmin && (
+              <Button
+                variant={view === "locations" ? "default" : "ghost"}
+                size="sm"
+                className="h-8 shrink-0"
+                onClick={() => setView("locations")}
+                data-testid="button-view-locations"
+              >
+                <MapPin className="mr-1.5 h-4 w-4" />
+                Locations
+              </Button>
+            )}
             {can.manageUsers && (
               <Button
                 variant={view === "users" ? "default" : "ghost"}
@@ -1270,7 +1445,15 @@ export default function Home() {
           )}
         </div>
 
-        {view === "users" && can.manageUsers ? (
+        {view === "locations" && isAdmin ? (
+          <LocationsAdminView
+            locations={locations}
+            loading={locationsLoading}
+            users={users}
+            boots={boots}
+            paidCars={paidCars}
+          />
+        ) : view === "users" && can.manageUsers ? (
           <div className="space-y-4">
             <SettingsCard
               historyVisibleDays={historyVisibleDays}
@@ -1300,6 +1483,9 @@ export default function Home() {
             fetching={historyFetching}
             canSeeFinancials={canSeeFinancials}
             isMobileView={isMobileView}
+            locations={locations}
+            locationFilter={historyLocation}
+            onLocationFilterChange={setHistoryLocation}
             onRefresh={() => refetchHistory()}
             onOpenDay={(d) => {
               setFilterDate(d);
@@ -2849,6 +3035,9 @@ function HistoryView({
   fetching,
   canSeeFinancials,
   isMobileView,
+  locations,
+  locationFilter,
+  onLocationFilterChange,
   onRefresh,
   onOpenDay,
 }: {
@@ -2858,9 +3047,19 @@ function HistoryView({
   // Admin-controlled gate: when false, staff see a "—" instead of fee amounts.
   canSeeFinancials: boolean;
   isMobileView: boolean;
+  // Locations the signed-in user may filter by (already access-scoped).
+  locations: LocationWithStaff[];
+  // "all" | "none" | location id (as string).
+  locationFilter: string;
+  onLocationFilterChange: (v: string) => void;
   onRefresh: () => void;
   onOpenDay: (day: string) => void;
 }) {
+  // The currently-selected location record (if a specific one is chosen).
+  const selectedLocation =
+    locationFilter !== "all" && locationFilter !== "none"
+      ? locations.find((l) => String(l.id) === locationFilter)
+      : undefined;
   const totals = days.reduce(
     (acc, d) => {
       acc.boots += d.bootCount;
@@ -2887,19 +3086,78 @@ function HistoryView({
               Booted, paid, and enforcement counts per day. Click a day to open it.
             </CardDescription>
           </div>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={onRefresh}
-            disabled={fetching}
-            data-testid="button-refresh-history"
-          >
-            <RefreshCw
-              className={`mr-1.5 h-3.5 w-3.5 ${fetching ? "animate-spin" : ""}`}
-            />
-            Refresh
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Per-location filter. Empty unless any locations exist. */}
+            {locations.length > 0 && (
+              <div className="flex items-center gap-1.5">
+                <Label
+                  htmlFor="history-location"
+                  className="text-xs font-medium text-muted-foreground"
+                >
+                  Location:
+                </Label>
+                <Select
+                  value={locationFilter}
+                  onValueChange={onLocationFilterChange}
+                >
+                  <SelectTrigger
+                    id="history-location"
+                    className="h-8 w-[170px]"
+                    data-testid="select-history-location"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All locations</SelectItem>
+                    <SelectItem value="none">No location</SelectItem>
+                    {locations.map((l) => (
+                      <SelectItem
+                        key={l.id}
+                        value={String(l.id)}
+                        data-testid={`option-history-location-${l.id}`}
+                      >
+                        <span className="flex items-center gap-2">
+                          <LocationDot color={l.color} />
+                          {l.name}
+                        </span>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onRefresh}
+              disabled={fetching}
+              data-testid="button-refresh-history"
+            >
+              <RefreshCw
+                className={`mr-1.5 h-3.5 w-3.5 ${fetching ? "animate-spin" : ""}`}
+              />
+              Refresh
+            </Button>
+          </div>
         </div>
+        {/* Active-filter chip so the scoped view is unmistakable. */}
+        {selectedLocation && (
+          <div
+            className="flex items-center gap-2 text-xs text-muted-foreground"
+            data-testid="text-history-location-active"
+          >
+            <LocationDot color={selectedLocation.color} />
+            Showing {selectedLocation.name} only
+          </div>
+        )}
+        {locationFilter === "none" && (
+          <div
+            className="text-xs text-muted-foreground"
+            data-testid="text-history-location-active"
+          >
+            Showing boots with no assigned location
+          </div>
+        )}
       </CardHeader>
       <CardContent>
         {loading ? (
@@ -3588,6 +3846,494 @@ function RequestsView({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+    </div>
+  );
+}
+
+// ---------- parking locations (admin only) ----------
+
+// Per-location enforcement tallies derived purely from the boots dataset
+// (paid cars aren't location-tagged). `booted` = currently on boot; `resolved`
+// = completed/settled; `fees` = total collected; `total` = all boots placed
+// at the location. Boot rate = active boots / total placed.
+type LocationStats = {
+  booted: number;
+  resolved: number;
+  fees: number;
+  total: number;
+  rate: number; // 0..1
+};
+
+function computeLocationStats(boots: Boot[], locationId: number): LocationStats {
+  const mine = boots.filter((b) => b.locationId === locationId);
+  const booted = mine.filter((b) => b.status === "booted").length;
+  const resolved = mine.filter(
+    (b) => b.status === "completed" || b.status === "settled",
+  ).length;
+  const fees = mine.reduce((s, b) => s + (b.amountCollected || 0), 0);
+  const total = mine.length;
+  const rate = total > 0 ? booted / total : 0;
+  return { booted, resolved, fees, total, rate };
+}
+
+// A single per-location overview card: color-keyed top border, location
+// name/address, a 2×2 metric grid, and a boot-rate progress bar (or an empty
+// state when no boots have been placed there yet).
+function LocationOverviewCard({
+  location,
+  stats,
+}: {
+  location: LocationWithStaff;
+  stats: LocationStats;
+}) {
+  const pct = Math.round(stats.rate * 100);
+  return (
+    <Card
+      className="overflow-hidden"
+      style={{ borderTop: `2.5px solid ${location.color}` }}
+      data-testid={`card-location-overview-${location.id}`}
+    >
+      <CardHeader className="pb-3">
+        <CardTitle className="flex items-center gap-2 text-sm">
+          <LocationDot color={location.color} size={11} />
+          <span className="truncate">{location.name}</span>
+        </CardTitle>
+        {location.address ? (
+          <CardDescription className="truncate text-xs">
+            {location.address}
+          </CardDescription>
+        ) : null}
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="grid grid-cols-2 gap-x-4 gap-y-2">
+          <OverviewMetric label="Booted" value={String(stats.total)} />
+          <OverviewMetric label="Paid" value={String(stats.resolved)} />
+          <OverviewMetric
+            label="Enforcement"
+            value={String(stats.booted)}
+            tone="text-red-700 dark:text-red-400"
+          />
+          <OverviewMetric
+            label="Fees"
+            value={currency(stats.fees)}
+            tone="text-green-700 dark:text-green-500"
+          />
+        </div>
+        {stats.total > 0 ? (
+          <div className="space-y-1">
+            <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+              <div
+                className="h-full rounded-full bg-primary transition-all"
+                style={{ width: `${pct}%` }}
+                data-testid={`bar-boot-rate-${location.id}`}
+              />
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {pct}% boot rate ({stats.booted} of {stats.total})
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-1">
+            <div className="h-2 w-full rounded-full bg-muted" />
+            <p className="text-xs text-muted-foreground">
+              No enforcement activity
+            </p>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// A single mono-font metric inside an overview card's 2×2 grid.
+function OverviewMetric({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: string;
+  tone?: string;
+}) {
+  return (
+    <div>
+      <div className="text-[11px] uppercase tracking-wide text-muted-foreground">
+        {label}
+      </div>
+      <div
+        className={`font-mono text-lg font-semibold tabular-nums ${tone ?? ""}`}
+      >
+        {value}
+      </div>
+    </div>
+  );
+}
+
+// Admin-only locations workspace: per-location enforcement overview cards on
+// top, then the Parking Locations management table with an inline add form.
+function LocationsAdminView({
+  locations,
+  loading,
+  users,
+  boots,
+  paidCars: _paidCars,
+}: {
+  locations: LocationWithStaff[];
+  loading: boolean;
+  users: User[];
+  boots: Boot[];
+  paidCars: PaidCar[];
+}) {
+  const { toast } = useToast();
+  // Inline add-location form open state + fields.
+  const [adding, setAdding] = useState(false);
+  const [name, setName] = useState("");
+  const [address, setAddress] = useState("");
+  const [color, setColor] = useState<string>(LOCATION_COLORS[0]);
+  const [staffIds, setStaffIds] = useState<number[]>([]);
+
+  // Assignable staff = everyone except admins (admins implicitly see all).
+  const assignableStaff = useMemo(
+    () => users.filter((u) => u.role !== "admin" && u.active),
+    [users],
+  );
+
+  function resetForm() {
+    setName("");
+    setAddress("");
+    setColor(LOCATION_COLORS[0]);
+    setStaffIds([]);
+  }
+
+  const createMutation = useMutation({
+    mutationFn: async () => {
+      const payload = insertLocationSchema.parse({
+        name,
+        address,
+        color,
+        staffIds,
+      });
+      const res = await apiRequest("POST", "/api/locations", payload);
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/locations"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/locations/mine"] });
+      resetForm();
+      setAdding(false);
+      toast({ title: "Location added", description: "The parking location is now active." });
+    },
+    onError: (err: Error) => {
+      toast({
+        title: "Could not add location",
+        description: err.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  // Patch a single location (active toggle or staff reassignment).
+  const updateMutation = useMutation({
+    mutationFn: async (vars: {
+      id: number;
+      patch: UpdateLocationInput;
+    }) => {
+      const res = await apiRequest(
+        "PATCH",
+        `/api/locations/${vars.id}`,
+        vars.patch,
+      );
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/locations"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/locations/mine"] });
+    },
+    onError: (err: Error) => {
+      toast({
+        title: "Could not update location",
+        description: err.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  function toggleStaff(id: number) {
+    setStaffIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+    );
+  }
+
+  const activeLocations = locations.filter((l) => l.active);
+
+  return (
+    <div className="space-y-6">
+      {/* Per-location enforcement overview (admin only) */}
+      <section>
+        <h2 className="mb-3 flex items-center gap-2 text-base font-semibold">
+          <BarChart3 className="h-4 w-4 text-primary" />
+          Per-location enforcement overview
+        </h2>
+        {loading ? (
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {[0, 1, 2].map((i) => (
+              <Skeleton key={i} className="h-44 w-full rounded-lg" />
+            ))}
+          </div>
+        ) : activeLocations.length === 0 ? (
+          <Card>
+            <CardContent className="py-8 text-center text-sm text-muted-foreground">
+              No parking locations yet. Add one below to start tracking
+              enforcement per location.
+            </CardContent>
+          </Card>
+        ) : (
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {activeLocations.map((loc) => (
+              <LocationOverviewCard
+                key={loc.id}
+                location={loc}
+                stats={computeLocationStats(boots, loc.id)}
+              />
+            ))}
+          </div>
+        )}
+      </section>
+
+      {/* Parking Locations management */}
+      <Card data-testid="card-locations">
+        <CardHeader>
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <CardTitle className="flex items-center gap-2 text-base">
+                <MapPin className="h-4 w-4 text-primary" />
+                Parking locations
+              </CardTitle>
+              <CardDescription>
+                Manage the lots you enforce and assign staff who may place
+                boots there. Admins always see every location.
+              </CardDescription>
+            </div>
+            <Button
+              size="sm"
+              onClick={() => {
+                if (adding) {
+                  resetForm();
+                  setAdding(false);
+                } else {
+                  setAdding(true);
+                }
+              }}
+              data-testid="button-add-location"
+            >
+              <Plus className="mr-1.5 h-4 w-4" />
+              {adding ? "Cancel" : "Add location"}
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {/* Inline add-location form */}
+          {adding && (
+            <div
+              className="space-y-4 rounded-lg border bg-muted/30 p-4"
+              data-testid="form-add-location"
+            >
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                  <Label htmlFor="loc-name" className="text-sm font-medium">
+                    Location name
+                  </Label>
+                  <Input
+                    id="loc-name"
+                    placeholder="Downtown Lot A"
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    data-testid="input-location-name"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="loc-address" className="text-sm font-medium">
+                    Address{" "}
+                    <span className="font-normal text-muted-foreground">
+                      (optional)
+                    </span>
+                  </Label>
+                  <Input
+                    id="loc-address"
+                    placeholder="123 Main St, Fort Worth"
+                    value={address}
+                    onChange={(e) => setAddress(e.target.value)}
+                    data-testid="input-location-address"
+                  />
+                </div>
+              </div>
+
+              {/* Color picker */}
+              <div className="space-y-1.5">
+                <Label className="text-sm font-medium">Color</Label>
+                <div className="flex flex-wrap gap-2">
+                  {LOCATION_COLORS.map((c) => (
+                    <button
+                      key={c}
+                      type="button"
+                      onClick={() => setColor(c)}
+                      className={`h-7 w-7 rounded-full ring-offset-2 ring-offset-background transition ${
+                        color === c ? "ring-2 ring-foreground" : ""
+                      }`}
+                      style={{ background: c }}
+                      aria-label={`Use color ${c}`}
+                      data-testid={`swatch-location-color-${c.replace("#", "")}`}
+                    />
+                  ))}
+                </div>
+              </div>
+
+              {/* Assign staff access */}
+              <div className="space-y-2">
+                <Label className="text-sm font-medium">
+                  Assign staff access
+                </Label>
+                {assignableStaff.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">
+                    No staff to assign yet.
+                  </p>
+                ) : (
+                  <div className="flex flex-wrap gap-2">
+                    {assignableStaff.map((u) => {
+                      const on = staffIds.includes(u.id);
+                      return (
+                        <button
+                          key={u.id}
+                          type="button"
+                          onClick={() => toggleStaff(u.id)}
+                          className={`flex items-center gap-2 rounded-full border px-2.5 py-1 text-sm transition ${
+                            on
+                              ? "border-primary bg-primary/10"
+                              : "border-border hover:bg-muted"
+                          }`}
+                          data-testid={`toggle-assign-staff-${u.id}`}
+                        >
+                          <Checkbox
+                            checked={on}
+                            className="pointer-events-none"
+                            tabIndex={-1}
+                          />
+                          <span
+                            className="flex h-5 w-5 items-center justify-center rounded-full text-[9px] font-medium text-white"
+                            style={{ background: avatarColor(u.id) }}
+                          >
+                            {initialOf(u.name)}
+                          </span>
+                          {u.name}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              <div className="flex justify-end gap-2">
+                <Button
+                  variant="ghost"
+                  onClick={() => {
+                    resetForm();
+                    setAdding(false);
+                  }}
+                  data-testid="button-cancel-location"
+                >
+                  Cancel
+                </Button>
+                <Button
+                  onClick={() => createMutation.mutate()}
+                  disabled={!name.trim() || createMutation.isPending}
+                  data-testid="button-save-location"
+                >
+                  {createMutation.isPending ? "Saving…" : "Save location"}
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {/* Locations table */}
+          {loading ? (
+            <div className="space-y-2">
+              {[0, 1, 2].map((i) => (
+                <Skeleton key={i} className="h-12 w-full" />
+              ))}
+            </div>
+          ) : locations.length === 0 ? (
+            <p
+              className="py-6 text-center text-sm text-muted-foreground"
+              data-testid="text-no-locations"
+            >
+              No parking locations yet. Add your first one above.
+            </p>
+          ) : (
+            <div className="overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-8"></TableHead>
+                    <TableHead>Location</TableHead>
+                    <TableHead>Address</TableHead>
+                    <TableHead>Staff</TableHead>
+                    <TableHead>Status</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {locations.map((loc) => (
+                    <TableRow
+                      key={loc.id}
+                      data-testid={`row-location-${loc.id}`}
+                    >
+                      <TableCell>
+                        <LocationDot color={loc.color} size={12} />
+                      </TableCell>
+                      <TableCell className="font-medium">{loc.name}</TableCell>
+                      <TableCell className="text-muted-foreground">
+                        {loc.address || "—"}
+                      </TableCell>
+                      <TableCell>
+                        <StaffChips staffIds={loc.staffIds} users={users} />
+                      </TableCell>
+                      <TableCell>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            updateMutation.mutate({
+                              id: loc.id,
+                              patch: { active: !loc.active },
+                            })
+                          }
+                          disabled={updateMutation.isPending}
+                          data-testid={`button-toggle-location-${loc.id}`}
+                        >
+                          {loc.active ? (
+                            <span
+                              className="inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium"
+                              style={{
+                                background: "#EAF3DE",
+                                color: "#27500A",
+                                borderColor: "#C0DD97",
+                              }}
+                            >
+                              Active
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center rounded-full border bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground">
+                              Inactive
+                            </span>
+                          )}
+                        </button>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }

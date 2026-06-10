@@ -131,9 +131,11 @@ export function FieldAddVehicle({
       };
       if (space.trim()) body.space = space.trim();
       if (method) body.method = method;
-      // Only attach the amount when staff may see financials. The server also
-      // drops it defensively, but we avoid sending it at all when gated.
-      if (canSeeFinancials && amount.trim()) {
+      // Attach the amount when staff may see financials OR when this is a CASH
+      // payment (cash always needs an amount for the attendant cash-owed
+      // tracker). The server enforces the same rule authoritatively — it keeps
+      // cash amounts and drops card/app amounts when financials are hidden.
+      if ((canSeeFinancials || method === "cash") && amount.trim()) {
         const n = Number(amount);
         if (Number.isFinite(n) && n >= 0) body.amount = n;
       }
@@ -147,6 +149,9 @@ export function FieldAddVehicle({
     onSuccess: (row) => {
       queryClient.invalidateQueries({ queryKey: ["/api/paid-cars"] });
       queryClient.invalidateQueries({ queryKey: ["/api/history"] });
+      // A cash payment was just recorded server-side; refresh the attendant's
+      // running cash-owed total so the dashboard widget updates immediately.
+      queryClient.invalidateQueries({ queryKey: ["/api/cash/mine"] });
       // SMS-stub: there is no SMS trigger for "paid vehicle logged" in the
       // approved trigger set (request/release/check-in/check-out only), so we
       // intentionally do NOT dispatch a message here.
@@ -378,25 +383,56 @@ export function FieldAddVehicle({
                   </div>
                 </>
               ) : (
-                // State 3 — financials gated: amount locked. Method stays usable
-                // since it isn't a financial value, matching the mock's intent.
+                // State 3 — financials gated. Revenue is hidden from staff, so the
+                // amount stays locked for CARD / APP. CASH is the exception: the
+                // attendant must record the cash figure for their cash-owed
+                // tracker, so when Cash is selected the amount input unlocks.
                 <>
-                  <div
-                    className="flex items-center gap-2 rounded-[0.875rem] px-[13px] py-3"
-                    style={{
-                      background: FIELD.fieldBg,
-                      border: `1px dashed ${FIELD.line}`,
-                    }}
-                    data-testid="add-amount-locked"
-                  >
-                    <Lock className="h-4 w-4" style={{ color: FIELD.ink3 }} />
-                    <span
-                      className="text-[12.5px] font-medium"
-                      style={{ color: FIELD.ink3 }}
+                  {method === "cash" ? (
+                    <div
+                      className="flex items-center gap-2 rounded-[0.875rem] px-[13px] py-3"
+                      style={{
+                        background: FIELD.fieldBg,
+                        border: `1px solid ${FIELD.line}`,
+                      }}
+                      data-testid="add-amount-cash"
                     >
-                      Payment amount hidden by admin settings
-                    </span>
-                  </div>
+                      <span
+                        className="text-[16px] font-bold"
+                        style={{ color: FIELD.ink2, fontFamily: FIELD_MONO }}
+                      >
+                        $
+                      </span>
+                      <input
+                        value={amount}
+                        onChange={(e) =>
+                          setAmount(e.target.value.replace(/[^0-9.]/g, ""))
+                        }
+                        placeholder="cash collected"
+                        inputMode="decimal"
+                        className="w-full bg-transparent text-[15px] font-semibold outline-none placeholder:font-normal placeholder:text-[#94a1ad]"
+                        style={{ fontFamily: FIELD_MONO, color: FIELD.ink }}
+                        data-testid="input-add-amount"
+                      />
+                    </div>
+                  ) : (
+                    <div
+                      className="flex items-center gap-2 rounded-[0.875rem] px-[13px] py-3"
+                      style={{
+                        background: FIELD.fieldBg,
+                        border: `1px dashed ${FIELD.line}`,
+                      }}
+                      data-testid="add-amount-locked"
+                    >
+                      <Lock className="h-4 w-4" style={{ color: FIELD.ink3 }} />
+                      <span
+                        className="text-[12.5px] font-medium"
+                        style={{ color: FIELD.ink3 }}
+                      >
+                        Amount hidden by admin — select Cash to log a cash total
+                      </span>
+                    </div>
+                  )}
                   <div className="mt-2.5 grid grid-cols-3 gap-2">
                     <MethodChip
                       label="Cash"

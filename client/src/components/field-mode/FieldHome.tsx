@@ -15,6 +15,17 @@ import { FieldAddVehicle } from "./FieldAddVehicle";
 import { FieldInventory } from "./FieldInventory";
 import { FieldRequestBoot } from "./FieldRequestBoot";
 import { FieldSearch } from "./FieldSearch";
+import {
+  useFieldNotifications,
+  useCashSummary,
+  NotificationCenter,
+  AccountMenu,
+  AttendantWidget,
+  CashTracker,
+  type FieldNotification,
+} from "./FieldOverlays";
+import type { CashSummary, AppSettings } from "@shared/schema";
+import { useAuth } from "@/components/auth-provider";
 
 // Shape of a paid car (from /api/paid-cars). Mirrors the full PaidCar type in
 // home.tsx — Field Mode now renders these rows in the Inventory + Search tabs
@@ -83,6 +94,9 @@ export type FieldHomeData = {
   paidPlates: Set<string>;
   assignedLot: Location | null;
   canSeeFinancials: boolean;
+  // Attendant widget feeds (notification mirror + running cash total).
+  notifications: FieldNotification[];
+  cash: CashSummary | undefined;
 };
 
 export function FieldHome({
@@ -91,14 +105,16 @@ export function FieldHome({
   onRequestBoot,
   onOpenBoot,
   onSeeInventory,
+  onOpenNotifications,
 }: {
   data: FieldHomeData;
   onAddPaid: () => void;
   onRequestBoot: () => void;
   onOpenBoot: (boot: Boot) => void;
   onSeeInventory: () => void;
+  onOpenNotifications: () => void;
 }) {
-  const { todayBoots, paidCount, paidPlates, assignedLot, canSeeFinancials } =
+  const { todayBoots, paidCount, paidPlates, assignedLot, canSeeFinancials, notifications, cash } =
     data;
 
   const [search, setSearch] = useState("");
@@ -210,6 +226,17 @@ export function FieldHome({
           )}
         </div>
       </section>
+
+      {/* Attendant dashboard widget — centered for the attendant: reservation/
+          boot confirmations + messages/alerts + running cash-owed total. */}
+      <AttendantWidget
+        notifications={notifications}
+        cash={cash}
+        onOpenNotifications={onOpenNotifications}
+      />
+
+      {/* Cash tracker — running total of cash owed from manual entries. */}
+      <CashTracker cash={cash} />
 
       {/* Action buttons */}
       <section className="grid grid-cols-2 gap-[11px]">
@@ -542,6 +569,7 @@ function BootGlyph() {
 // ---------------------------------------------------------------------------
 export function FieldMode({
   userName,
+  userId,
   boots,
   paidCars,
   locations,
@@ -549,6 +577,7 @@ export function FieldMode({
   canSeeFinancials,
 }: {
   userName: string;
+  userId: number;
   boots: Boot[];
   paidCars: PaidCarLite[];
   locations: Location[];
@@ -556,6 +585,27 @@ export function FieldMode({
   canSeeFinancials: boolean;
 }) {
   const [view, setView] = useState<FieldView>("home");
+  // Overlay open state for the bell (notification center) and hamburger (account
+  // menu). Both render as bottom sheets ABOVE the shell.
+  const [notifOpen, setNotifOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  // Account context for the hamburger menu (Settings + change password + logout).
+  const { changePassword, logout } = useAuth();
+  const settingsQuery = useQuery<AppSettings>({
+    queryKey: ["/api/settings"],
+    queryFn: async () => {
+      const res = await apiRequest("GET", "/api/settings");
+      return res.json();
+    },
+    staleTime: 60_000,
+  });
+
+  // Notification center feed (resolved boot/release requests this attendant
+  // raised) + the attendant's running cash-owed total.
+  const { notifications, hasUnread } = useFieldNotifications(userId);
+  const cashQuery = useCashSummary();
+  const cash = cashQuery.data;
 
   // Real shift state — the current user's open shift (or null). Drives both the
   // header shift bar and the Shift tab. `refetchInterval` keeps the header label
@@ -614,6 +664,8 @@ export function FieldMode({
     paidPlates,
     assignedLot,
     canSeeFinancials,
+    notifications,
+    cash,
   };
 
   // "Add Paid Vehicle" is a full-screen takeover (its own white X-header),
@@ -649,20 +701,17 @@ export function FieldMode({
     : "Off shift";
 
   return (
+    <>
     <FieldShell
       userName={userName}
       lotName={assignedLot?.name ?? "No lot assigned"}
       shift={{ onShift, label: shiftLabel }}
-      hasUnread={false}
+      hasUnread={hasUnread}
       active={view}
       onNavigate={setView}
       onOpenFab={() => setView("add")}
-      onOpenMenu={() => {
-        /* STUB: account/menu sheet — Pages 2-5 */
-      }}
-      onOpenNotifications={() => {
-        /* STUB: notifications — later page */
-      }}
+      onOpenMenu={() => setMenuOpen(true)}
+      onOpenNotifications={() => setNotifOpen(true)}
     >
       {view === "home" && (
         <FieldHome
@@ -670,6 +719,7 @@ export function FieldMode({
           onAddPaid={() => setView("add")}
           onRequestBoot={() => setView("request")}
           onSeeInventory={() => setView("inventory")}
+          onOpenNotifications={() => setNotifOpen(true)}
           onOpenBoot={() => {
             // Boot detail lives in the Inventory view (Page 4). Tapping a Home
             // activity row jumps there so the attendant can open the detail
@@ -711,6 +761,28 @@ export function FieldMode({
           <FieldStub view={view} onBack={() => setView("home")} />
         )}
     </FieldShell>
+
+      {/* Bell → notification center popup (replies from enforcer/admin to this
+          attendant's boot + release requests). */}
+      {notifOpen && (
+        <NotificationCenter
+          notifications={notifications}
+          onClose={() => setNotifOpen(false)}
+        />
+      )}
+
+      {/* Hamburger → account menu: Settings, Time Sheet records, change
+          password, logout. */}
+      {menuOpen && (
+        <AccountMenu
+          userName={userName}
+          settings={settingsQuery.data ?? null}
+          changePassword={changePassword}
+          onLogout={logout}
+          onClose={() => setMenuOpen(false)}
+        />
+      )}
+    </>
   );
 }
 

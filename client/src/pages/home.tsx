@@ -1157,6 +1157,7 @@ export default function Home() {
     return (
       <FieldMode
         userName={user?.name ?? "Attendant"}
+        userId={user?.id ?? 0}
         boots={boots}
         paidCars={paidCars}
         locations={locations}

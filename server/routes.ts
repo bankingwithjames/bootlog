@@ -1068,8 +1068,15 @@ export async function registerRoutes(
     // Financials gating: when the admin hides financials from staff, ignore any
     // payment amount staff might send (the field is locked in their UI anyway).
     // The method/space are operational and remain allowed.
+    //
+    // EXCEPTION — cash collections: a CASH amount is always accepted regardless
+    // of the financials setting, because the attendant cash tracker needs the
+    // per-vehicle cash figure to compute the running total they owe the admin.
+    // "Show financials to staff" only governs aggregate revenue KPIs (e.g.
+    // "Collected today"), not the attendant's own cash-owed ledger.
     const showFinancials = await staffCanSeeFinancials(req);
-    const effectiveAmount = showFinancials ? amount ?? null : null;
+    const effectiveAmount =
+      showFinancials || method === "cash" ? amount ?? null : null;
 
     // Staff cannot log paid cars onto days outside their visible window.
     const cutoff = await staffVisibleCutoffDay(req, tz);
@@ -1104,7 +1111,47 @@ export async function registerRoutes(
       method: method ?? null,
       space: space ?? null,
     });
+
+    // When the field payment was taken in CASH and an amount was recorded, also
+    // write an auditable cash-ledger row attributed to the collecting attendant.
+    // This is the running total the attendant owes the admin until reconciled.
+    if (method === "cash" && effectiveAmount && effectiveAmount > 0) {
+      const actor = actorOf(req)!;
+      try {
+        await storage.addCashCollection({
+          day: date,
+          snapshotSessionId: row.sessionId,
+          licensePlate,
+          makeModel,
+          amount: effectiveAmount,
+          collectedById: actor.id,
+          collectedByName: actor.name,
+          collectedAt: now,
+          reconciled: false,
+          reconciledAt: null,
+          reconciledByName: null,
+        });
+      } catch {
+        // Cash-ledger write is best-effort: never block the operational paid row.
+      }
+    }
     res.status(201).json(snapshotToCar(row));
+  });
+
+  // ---- Cash collections: the current attendant's running cash total ----
+  // GET /api/cash/mine -> { owedTotal, reconciledTotal, owedCount, recent[] }
+  // The total of cash the signed-in attendant has logged (and still owes the
+  // admin) from manual cash entries. Each staff member sees only their own.
+  app.get("/api/cash/mine", requireAuth, async (req, res) => {
+    const summary = await storage.getCashSummaryForCollector(req.user!.id);
+    res.json(summary);
+  });
+
+  // ---- Shifts: the current user's own shift history (timesheet) ----
+  // GET /api/shifts/mine -> { shifts: Shift[] } newest first.
+  app.get("/api/shifts/mine", requireAuth, async (req, res) => {
+    const shifts = await storage.getShiftsForUser(req.user!.id);
+    res.json({ shifts });
   });
 
   // ---- Cross-reference: normalized plates that paid that day ----

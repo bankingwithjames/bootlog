@@ -21,6 +21,9 @@ import type {
   InsertLocation,
   UpdateLocationInput,
   Shift,
+  CashCollection,
+  InsertCashCollection,
+  CashSummary,
 } from "@shared/schema";
 import { supabase } from "./supabase";
 import { hashPassword } from "./auth";
@@ -157,6 +160,23 @@ function rowToReleaseRequest(row: any): ReleaseRequest {
   } as ReleaseRequest;
 }
 
+function rowToCashCollection(row: any): CashCollection {
+  return {
+    id: row.id,
+    day: row.day,
+    snapshotSessionId: row.snapshot_session_id ?? null,
+    licensePlate: row.license_plate,
+    makeModel: row.make_model ?? "",
+    amount: row.amount ?? 0,
+    collectedById: row.collected_by_id,
+    collectedByName: row.collected_by_name ?? "",
+    collectedAt: row.collected_at,
+    reconciled: Boolean(row.reconciled),
+    reconciledAt: row.reconciled_at ?? null,
+    reconciledByName: row.reconciled_by_name ?? null,
+  } as CashCollection;
+}
+
 function rowToSnapshot(row: any): PaidSnapshot {
   return {
     id: row.id,
@@ -248,6 +268,12 @@ export interface IStorage {
     checkOutLng: number | null,
   ): Promise<Shift | undefined>;
   getShiftById(id: number): Promise<Shift | undefined>;
+  // A user's own shift history (timesheet), newest first.
+  getShiftsForUser(userId: number, limit?: number): Promise<Shift[]>;
+  // Cash collections (attendant cash ledger)
+  addCashCollection(row: InsertCashCollection): Promise<CashCollection>;
+  getCashForCollector(collectorId: number): Promise<CashCollection[]>;
+  getCashSummaryForCollector(collectorId: number): Promise<CashSummary>;
   // Boot requests
   getBootRequests(): Promise<BootRequest[]>;
   getBootRequest(id: number): Promise<BootRequest | undefined>;
@@ -758,6 +784,84 @@ export class DatabaseStorage implements IStorage {
     );
     const row = (rows ?? [])[0];
     return row ? rowToShift(row) : undefined;
+  }
+
+  async getShiftsForUser(userId: number, limit = 60): Promise<Shift[]> {
+    const rows = check(
+      await supabase
+        .from("shifts")
+        .select("*")
+        .eq("user_id", userId)
+        .order("check_in_at", { ascending: false })
+        .limit(limit),
+      "getShiftsForUser",
+    );
+    return (rows ?? []).map(rowToShift);
+  }
+
+  // ---- Cash collections ----
+  async addCashCollection(
+    row: InsertCashCollection,
+  ): Promise<CashCollection> {
+    const inserted = check(
+      await supabase
+        .from("cash_collections")
+        .insert({
+          day: row.day,
+          snapshot_session_id: row.snapshotSessionId ?? null,
+          license_plate: row.licensePlate,
+          make_model: row.makeModel ?? "",
+          amount: row.amount ?? 0,
+          collected_by_id: row.collectedById,
+          collected_by_name: row.collectedByName ?? "",
+          collected_at: row.collectedAt,
+          reconciled: row.reconciled ?? false,
+          reconciled_at: row.reconciledAt ?? null,
+          reconciled_by_name: row.reconciledByName ?? null,
+        })
+        .select("*")
+        .single(),
+      "addCashCollection",
+    );
+    return rowToCashCollection(inserted);
+  }
+
+  async getCashForCollector(
+    collectorId: number,
+  ): Promise<CashCollection[]> {
+    const rows = check(
+      await supabase
+        .from("cash_collections")
+        .select("*")
+        .eq("collected_by_id", collectorId)
+        .order("collected_at", { ascending: false }),
+      "getCashForCollector",
+    );
+    return (rows ?? []).map(rowToCashCollection);
+  }
+
+  async getCashSummaryForCollector(
+    collectorId: number,
+  ): Promise<CashSummary> {
+    const all = await this.getCashForCollector(collectorId);
+    let owedTotal = 0;
+    let reconciledTotal = 0;
+    let owedCount = 0;
+    for (const c of all) {
+      const amt = Number(c.amount) || 0;
+      if (c.reconciled) {
+        reconciledTotal += amt;
+      } else {
+        owedTotal += amt;
+        owedCount += 1;
+      }
+    }
+    return {
+      owedTotal: Math.round(owedTotal * 100) / 100,
+      reconciledTotal: Math.round(reconciledTotal * 100) / 100,
+      owedCount,
+      recent: all.slice(0, 20),
+    };
   }
 
   async createShift(input: {

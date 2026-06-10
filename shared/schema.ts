@@ -440,6 +440,54 @@ export const manualPaidCarSchema = z.object({
 export type ManualPaidCar = z.infer<typeof manualPaidCarSchema>;
 
 // ---------------------------------------------------------------------------
+// Cash collections (attendant cash ledger for admin reconciliation)
+// ---------------------------------------------------------------------------
+// Every manual CASH payment an attendant records is also written here as an
+// auditable ledger row, separate from the operational paid_snapshots record.
+// paid_snapshots stays the inventory record; cash_collections is the money
+// trail the admin uses to verify, then physically collect, the cash an
+// attendant is holding. Each row is attributed to the collecting attendant
+// (collectedById/Name) and carries a reconciliation flag the admin flips once
+// the cash has been handed over (admin-side view is built later).
+export const cashCollections = sqliteTable("cash_collections", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  // Local day this collection belongs to, YYYY-MM-DD (attendant's timezone).
+  day: text("day").notNull(),
+  // Links back to the paid_snapshots row this cash came from (sessionId).
+  snapshotSessionId: text("snapshot_session_id"),
+  licensePlate: text("license_plate").notNull(),
+  makeModel: text("make_model").notNull().default(""),
+  // Dollar amount of cash taken.
+  amount: real("amount").notNull().default(0),
+  // Attendant who collected the cash (id + name snapshot for the audit trail).
+  collectedById: integer("collected_by_id").notNull(),
+  collectedByName: text("collected_by_name").notNull().default(""),
+  // ISO 8601 timestamp of when the cash was logged.
+  collectedAt: text("collected_at").notNull(),
+  // Reconciliation: false until the admin verifies + collects the cash.
+  reconciled: integer("reconciled", { mode: "boolean" })
+    .notNull()
+    .default(false),
+  reconciledAt: text("reconciled_at"),
+  reconciledByName: text("reconciled_by_name"),
+});
+
+export type CashCollection = typeof cashCollections.$inferSelect;
+export type InsertCashCollection = Omit<CashCollection, "id">;
+
+// Running cash summary the attendant sees in their dashboard / cash tracker.
+export type CashSummary = {
+  // Total dollars of cash logged that the attendant still owes (unreconciled).
+  owedTotal: number;
+  // Total dollars reconciled (already handed to admin).
+  reconciledTotal: number;
+  // Count of unreconciled cash entries.
+  owedCount: number;
+  // Most recent cash entries (newest first), for the running list.
+  recent: CashCollection[];
+};
+
+// ---------------------------------------------------------------------------
 // App settings (admin-controlled key/value store)
 // ---------------------------------------------------------------------------
 // A tiny key/value store for admin-controlled app settings. The first setting

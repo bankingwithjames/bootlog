@@ -29,6 +29,10 @@ export interface PaidCar {
   licensePlate: string;
   paidAt: string; // ISO timestamp
   source?: "stripe" | "manual"; // origin of this row (defaults to stripe)
+  // Manual-entry payment details (only present on manual rows).
+  amount?: number | null; // dollars collected at the lot
+  method?: "cash" | "card" | "app" | null; // how it was paid in the field
+  space?: string | null; // parking space / row label
 }
 
 import { ProxyAgent, request, type Dispatcher } from "undici";

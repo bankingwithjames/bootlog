@@ -131,7 +131,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         enforcement: isAdmin || isEnforcer,
         workRequests: isAdmin || isEnforcer,
         deleteBoot: isAdmin,
-        logPaidCar: isAdmin || isEnforcer, // financial action: enforcers + admins only
+        logPaidCar: isAdmin || isEnforcer || isAttendant, // logging a paid vehicle is part of the attendant's field workflow
         manageUsers: isAdmin,
       },
     };

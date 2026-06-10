@@ -362,6 +362,15 @@ export const paidSnapshots = sqliteTable("paid_snapshots", {
   // Where this row came from: "stripe" (pulled from Stripe) or "manual"
   // (entered by the attendant). Manual rows persist across Stripe refreshes.
   source: text("source").notNull().default("stripe"),
+  // ---- Manual-entry payment details (nullable; Stripe rows leave these null) ----
+  // Amount collected at the lot for a manually-logged vehicle. The dollar value
+  // is the source of record for cash/card/app payments taken in the field;
+  // Stripe remains the system of record for online payments.
+  amount: real("amount"),
+  // How the field payment was taken: "cash" | "card" | "app".
+  method: text("method"),
+  // Optional parking space / row label (e.g. "Row C \u00b7 #18").
+  space: text("space"),
 });
 
 export const insertPaidSnapshotSchema = createInsertSchema(paidSnapshots).omit({
@@ -379,6 +388,12 @@ export const manualPaidCarSchema = z.object({
   licensePlate: z.string().trim().min(1, "License plate is required"),
   makeModel: z.string().trim().min(1, "Make & model is required"),
   color: z.string().trim().min(1, "Color is required"),
+  // Optional parking space / row label.
+  space: z.string().trim().max(60).optional(),
+  // Amount collected at the lot (dollars). Optional; >= 0 when present.
+  amount: z.number().nonnegative().optional(),
+  // Payment method taken in the field.
+  method: z.enum(["cash", "card", "app"]).optional(),
 });
 
 export type ManualPaidCar = z.infer<typeof manualPaidCarSchema>;

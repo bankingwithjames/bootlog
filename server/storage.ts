@@ -148,6 +148,9 @@ function rowToSnapshot(row: any): PaidSnapshot {
     color: row.color,
     paidAt: row.paid_at,
     source: row.source ?? "stripe",
+    amount: row.amount ?? null,
+    method: row.method ?? null,
+    space: row.space ?? null,
   } as PaidSnapshot;
 }
 
@@ -833,6 +836,9 @@ export class DatabaseStorage implements IStorage {
           color: row.color,
           paid_at: row.paidAt,
           source: "manual",
+          amount: row.amount ?? null,
+          method: row.method ?? null,
+          space: row.space ?? null,
         })
         .select("*")
         .single(),

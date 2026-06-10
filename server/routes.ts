@@ -103,6 +103,15 @@ async function staffVisibleCutoffDay(
   return dayMinus(todayKey(tz), historyVisibleDays);
 }
 
+// Whether the requesting user may see/record financial amounts.
+//   - admin -> always true (admin bypasses the staff gate)
+//   - staff (attendant/enforcer) -> only when showFinancialsToStaff is on
+async function staffCanSeeFinancials(req: Request): Promise<boolean> {
+  if (req.user?.role === "admin") return true;
+  const { showFinancialsToStaff } = await storage.getSettings();
+  return showFinancialsToStaff;
+}
+
 // Human-readable elapsed label between two ISO timestamps, e.g. "3h 12m".
 // Used in the check-out SMS so the recipient sees how long the shift ran.
 function shiftDurationLabel(startIso: string, endIso: string): string {
@@ -134,6 +143,9 @@ function snapshotToCar(s: PaidSnapshot): PaidCar {
     licensePlate: s.licensePlate,
     paidAt: s.paidAt,
     source: s.source === "manual" ? "manual" : "stripe",
+    amount: s.amount ?? null,
+    method: (s.method as "cash" | "card" | "app" | null) ?? null,
+    space: s.space ?? null,
   };
 }
 
@@ -906,18 +918,27 @@ export async function registerRoutes(
   });
 
   // ---- Manually log a paid car for a given day ----
-  // POST /api/paid-cars/manual  { date, tz, licensePlate, makeModel, color }
-  // Payments are processed by a 3rd party (Stripe). Manually logging a
-  // transaction is a financial action, so it is limited to enforcers and
-  // admins. Attendants cannot record manual payments.
-  app.post("/api/paid-cars/manual", requireRole("enforcer", "admin"), async (req, res) => {
+  // POST /api/paid-cars/manual
+  //   { date, tz, licensePlate, makeModel, color, space?, amount?, method? }
+  // Logging a paid vehicle at the lot is part of the attendant's day-to-day
+  // job (Field Mode "Add Paid Vehicle"), so attendants, enforcers, and admins
+  // may all record one. Stripe remains the system of record for online
+  // payments; manual rows capture cash/card/app collected in the field.
+  app.post("/api/paid-cars/manual", requireRole("attendant", "enforcer", "admin"), async (req, res) => {
     const parsed = manualPaidCarSchema.safeParse(req.body);
     if (!parsed.success) {
       return res
         .status(400)
         .json({ message: fromZodError(parsed.error).toString() });
     }
-    const { date, tz, licensePlate, makeModel, color } = parsed.data;
+    const { date, tz, licensePlate, makeModel, color, space, amount, method } =
+      parsed.data;
+
+    // Financials gating: when the admin hides financials from staff, ignore any
+    // payment amount staff might send (the field is locked in their UI anyway).
+    // The method/space are operational and remain allowed.
+    const showFinancials = await staffCanSeeFinancials(req);
+    const effectiveAmount = showFinancials ? amount ?? null : null;
 
     // Staff cannot log paid cars onto days outside their visible window.
     const cutoff = await staffVisibleCutoffDay(req, tz);
@@ -948,6 +969,9 @@ export async function registerRoutes(
       color,
       paidAt: now,
       source: "manual",
+      amount: effectiveAmount,
+      method: method ?? null,
+      space: space ?? null,
     });
     res.status(201).json(snapshotToCar(row));
   });

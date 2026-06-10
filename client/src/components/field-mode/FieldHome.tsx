@@ -11,6 +11,7 @@ import {
   type FieldView,
 } from "./FieldShell";
 import { FieldShift } from "./FieldShift";
+import { FieldAddVehicle } from "./FieldAddVehicle";
 
 // Minimal shape of a paid car (from /api/paid-cars). Field Mode only needs the
 // plate for cross-reference and counting; full type lives in home.tsx.
@@ -606,6 +607,20 @@ export function FieldMode({
     canSeeFinancials,
   };
 
+  // "Add Paid Vehicle" is a full-screen takeover (its own white X-header),
+  // rendered ABOVE the shell rather than inside the shell body. Matches the
+  // approved page3 mockup. Returning early keeps the tab bar / header hidden.
+  if (view === "add") {
+    return (
+      <FieldAddVehicle
+        assignedLot={assignedLot}
+        canSeeFinancials={canSeeFinancials}
+        onClose={() => setView("home")}
+        onViewInventory={() => setView("inventory")}
+      />
+    );
+  }
+
   // Header shift bar label, derived from real shift state.
   const shiftLabel = onShift
     ? `On shift · since ${shiftStartLabel(activeShift!.checkInAt)}`
@@ -646,7 +661,7 @@ export function FieldMode({
           onShiftChange={() => activeShiftQuery.refetch()}
         />
       )}
-      {view !== "home" && view !== "shift" && (
+      {view !== "home" && view !== "shift" && view !== "add" && (
         <FieldStub view={view} onBack={() => setView("home")} />
       )}
     </FieldShell>

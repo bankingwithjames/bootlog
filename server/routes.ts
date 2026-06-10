@@ -17,6 +17,7 @@ import {
   updateUserSchema,
   insertBootRequestSchema,
   resolveBootRequestSchema,
+  insertReleaseRequestSchema,
   updateSettingsSchema,
   insertLocationSchema,
   updateLocationSchema,
@@ -32,7 +33,11 @@ import {
   buildStaticMapUrl,
   fetchStaticMap,
 } from "./geo";
-import { notifyShiftCheckIn, notifyShiftCheckOut } from "./sms";
+import {
+  notifyShiftCheckIn,
+  notifyShiftCheckOut,
+  notifyReleaseRequest,
+} from "./sms";
 import {
   attachUser,
   requireAuth,
@@ -893,6 +898,116 @@ export async function registerRoutes(
     }
     res.status(204).end();
   });
+
+  // Attendant "Mark as Paid" (Page 4): attendants may close a booted vehicle as
+  // paid in full. Distinct from the enforcer-only status PATCH above so the
+  // admin/enforcer experience is unchanged. Sets status=completed and records
+  // the full boot fee as collected. Lot-scoped for non-admins.
+  app.patch(
+    "/api/boots/:id/mark-paid",
+    requireRole("attendant", "enforcer", "admin"),
+    async (req, res) => {
+      const id = Number(req.params.id);
+      if (Number.isNaN(id)) {
+        return res.status(400).json({ message: "Invalid id" });
+      }
+      const existing = (await storage.getBoots()).find((b) => b.id === id);
+      if (!existing) {
+        return res.status(404).json({ message: "Boot not found" });
+      }
+      // Lot scoping: non-admins can only act on boots at their assigned lots
+      // (or untagged boots). Admins may act on any.
+      const allowed = await allowedLocationIds(req);
+      if (
+        allowed &&
+        existing.locationId != null &&
+        !allowed.includes(existing.locationId)
+      ) {
+        return res
+          .status(403)
+          .json({ message: "This vehicle is not at one of your lots." });
+      }
+      if (existing.status === "completed") {
+        return res
+          .status(409)
+          .json({ message: "This vehicle is already marked paid." });
+      }
+      const fee = existing.bootFee ?? 0;
+      const updated = await storage.updateBootStatus(
+        id,
+        "completed",
+        fee,
+        new Date().toISOString(),
+        actorOf(req),
+      );
+      res.json(updated);
+    },
+  );
+
+  // ---- Release requests (Page 4) ----
+  // Attendants cannot remove boots; they submit a release request that queues
+  // for an enforcer/admin and pings them via the (stubbed) SMS layer.
+  app.get("/api/release-requests", requireAuth, async (_req, res) => {
+    res.json(await storage.getReleaseRequests());
+  });
+
+  app.post(
+    "/api/release-requests",
+    requireRole("attendant", "enforcer", "admin"),
+    async (req, res) => {
+      const parsed = insertReleaseRequestSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res
+          .status(400)
+          .json({ message: fromZodError(parsed.error).toString() });
+      }
+      const boot = (await storage.getBoots()).find(
+        (b) => b.id === parsed.data.bootId,
+      );
+      if (!boot) {
+        return res.status(404).json({ message: "Boot not found" });
+      }
+      // Only an active (booted) vehicle can be requested for release.
+      if (boot.status !== "booted") {
+        return res.status(409).json({
+          message: "This vehicle is not currently on a boot.",
+        });
+      }
+      // Lot scoping for non-admins.
+      const allowed = await allowedLocationIds(req);
+      if (
+        allowed &&
+        boot.locationId != null &&
+        !allowed.includes(boot.locationId)
+      ) {
+        return res
+          .status(403)
+          .json({ message: "This vehicle is not at one of your lots." });
+      }
+      const reqRow = await storage.createReleaseRequest(
+        { bootId: boot.id, note: parsed.data.note ?? "" },
+        {
+          licensePlate: boot.licensePlate,
+          makeModel: boot.makeModel,
+          locationId: boot.locationId ?? null,
+        },
+        actorOf(req)!,
+      );
+      // Stubbed SMS to the enforcer (real provider wired later).
+      const locName = boot.locationId
+        ? (await storage.getLocations()).find((l) => l.id === boot.locationId)
+            ?.name
+        : undefined;
+      notifyReleaseRequest({
+        plate: boot.licensePlate,
+        makeModel: boot.makeModel,
+        byName: actorOf(req)!.name,
+        bootId: boot.id,
+        locationName: locName,
+      });
+      res.status(201).json(reqRow);
+    },
+  );
 
   // ---- Paid cars (live today, stored snapshot for past days) ----
   // GET /api/paid-cars?date=YYYY-MM-DD&tz=<offsetMinutes>

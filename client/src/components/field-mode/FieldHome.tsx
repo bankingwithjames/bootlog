@@ -12,6 +12,7 @@ import {
 } from "./FieldShell";
 import { FieldShift } from "./FieldShift";
 import { FieldAddVehicle } from "./FieldAddVehicle";
+import { FieldInventory } from "./FieldInventory";
 
 // Minimal shape of a paid car (from /api/paid-cars). Field Mode only needs the
 // plate for cross-reference and counting; full type lives in home.tsx.
@@ -649,7 +650,10 @@ export function FieldMode({
           onRequestBoot={() => setView("request")}
           onSeeInventory={() => setView("inventory")}
           onOpenBoot={() => {
-            /* STUB: boot detail sheet — Page 4 */
+            // Boot detail lives in the Inventory view (Page 4). Tapping a Home
+            // activity row jumps there so the attendant can open the detail
+            // sheet + quick actions.
+            setView("inventory");
           }}
         />
       )}
@@ -661,9 +665,21 @@ export function FieldMode({
           onShiftChange={() => activeShiftQuery.refetch()}
         />
       )}
-      {view !== "home" && view !== "shift" && view !== "add" && (
-        <FieldStub view={view} onBack={() => setView("home")} />
+      {view === "inventory" && (
+        <FieldInventory
+          todayBoots={todayBoots}
+          paidCars={paidCars}
+          assignedLot={assignedLot}
+          canSeeFinancials={canSeeFinancials}
+          onBack={() => setView("home")}
+        />
       )}
+      {view !== "home" &&
+        view !== "shift" &&
+        view !== "inventory" &&
+        view !== "add" && (
+          <FieldStub view={view} onBack={() => setView("home")} />
+        )}
     </FieldShell>
   );
 }

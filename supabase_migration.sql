@@ -164,3 +164,14 @@ alter default privileges in schema public
 -- standalone reload statement).
 -- ---------------------------------------------------------------------------
 notify pgrst, 'reload schema';
+
+-- ---------------------------------------------------------------------------
+-- RLS policy for release_requests (Page 4, 2026-06-10):
+-- The table had RLS enabled but no permissive policy, so anon INSERTs were
+-- blocked (500: new row violates row-level security policy). Mirror the boots
+-- "app_all_boots" ALL/anon policy.
+-- ---------------------------------------------------------------------------
+alter table public.release_requests enable row level security;
+drop policy if exists app_all_release_requests on public.release_requests;
+create policy app_all_release_requests on public.release_requests
+  for all to anon using (true) with check (true);

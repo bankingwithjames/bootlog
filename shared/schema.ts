@@ -342,6 +342,47 @@ export const bootStatusSchema = z.object({
 
 export type BootStatusUpdate = z.infer<typeof bootStatusSchema>;
 
+// ---- Release requests (Page 4) ----
+// An attendant cannot remove a boot themselves; they REQUEST a release and an
+// enforcer/admin performs the physical removal. Each request is queued here so
+// enforcers have a visible work list (in addition to the stubbed SMS ping).
+// Lifecycle: pending -> released (enforcer removed the boot) | dismissed.
+export const RELEASE_REQUEST_STATUSES = [
+  "pending",
+  "released",
+  "dismissed",
+] as const;
+export type ReleaseRequestStatus = (typeof RELEASE_REQUEST_STATUSES)[number];
+
+export const releaseRequests = sqliteTable("release_requests", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  // The booted vehicle this request targets.
+  bootId: integer("boot_id").notNull(),
+  licensePlate: text("license_plate").notNull(),
+  makeModel: text("make_model").notNull(),
+  // Optional free-text reason from the attendant (e.g. "owner paid in cash").
+  note: text("note").notNull().default(""),
+  status: text("status").notNull().default("pending"),
+  // Who requested (attendant) and when.
+  requestedById: integer("requested_by_id"),
+  requestedByName: text("requested_by_name").notNull().default(""),
+  requestedAt: text("requested_at").notNull(),
+  // Who resolved (enforcer/admin) and when.
+  resolvedById: integer("resolved_by_id"),
+  resolvedByName: text("resolved_by_name"),
+  resolvedAt: text("resolved_at"),
+  // Lot the boot belongs to (for enforcer scoping / context).
+  locationId: integer("location_id"),
+});
+
+// Attendant submits a release request for a specific boot.
+export const insertReleaseRequestSchema = z.object({
+  bootId: z.coerce.number().int().positive("A boot id is required"),
+  note: z.string().trim().max(500).optional().default(""),
+});
+export type InsertReleaseRequest = z.infer<typeof insertReleaseRequestSchema>;
+export type ReleaseRequest = typeof releaseRequests.$inferSelect;
+
 // A stored snapshot of a paid car pulled from Stripe, keyed to a local day.
 // Snapshots let the attendant browse history for any of the last 30 days
 // without re-querying Stripe (and even if Stripe data later changes).

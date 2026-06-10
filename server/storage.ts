@@ -13,6 +13,8 @@ import type {
   Role,
   BootRequest,
   InsertBootRequest,
+  ReleaseRequest,
+  InsertReleaseRequest,
   AppSettings,
   Location,
   LocationWithStaff,
@@ -137,6 +139,24 @@ function rowToRequest(row: any): BootRequest {
   } as BootRequest;
 }
 
+function rowToReleaseRequest(row: any): ReleaseRequest {
+  return {
+    id: row.id,
+    bootId: row.boot_id,
+    licensePlate: row.license_plate,
+    makeModel: row.make_model,
+    note: row.note ?? "",
+    status: row.status,
+    requestedById: row.requested_by_id ?? null,
+    requestedByName: row.requested_by_name ?? "",
+    requestedAt: row.requested_at,
+    resolvedById: row.resolved_by_id ?? null,
+    resolvedByName: row.resolved_by_name ?? null,
+    resolvedAt: row.resolved_at ?? null,
+    locationId: row.location_id ?? null,
+  } as ReleaseRequest;
+}
+
 function rowToSnapshot(row: any): PaidSnapshot {
   return {
     id: row.id,
@@ -241,6 +261,13 @@ export interface IStorage {
     resolver: Actor,
     bootId: number | null,
   ): Promise<BootRequest | undefined>;
+  // Release requests (attendant -> enforcer to remove a boot)
+  getReleaseRequests(): Promise<ReleaseRequest[]>;
+  createReleaseRequest(
+    input: { bootId: number; note: string },
+    boot: { licensePlate: string; makeModel: string; locationId: number | null },
+    requester: Actor,
+  ): Promise<ReleaseRequest>;
   // Paid-car snapshots
   getSnapshotsForDay(day: string): Promise<PaidSnapshot[]>;
   getManualSnapshotsForDay(day: string): Promise<PaidSnapshot[]>;
@@ -446,6 +473,44 @@ export class DatabaseStorage implements IStorage {
     );
     const row = (rows ?? [])[0];
     return row ? rowToRequest(row) : undefined;
+  }
+
+  // ---- Release requests ----
+  async getReleaseRequests(): Promise<ReleaseRequest[]> {
+    const rows = check(
+      await supabase
+        .from("release_requests")
+        .select("*")
+        .order("requested_at", { ascending: false }),
+      "getReleaseRequests",
+    );
+    return (rows ?? []).map(rowToReleaseRequest);
+  }
+
+  async createReleaseRequest(
+    input: { bootId: number; note: string },
+    boot: { licensePlate: string; makeModel: string; locationId: number | null },
+    requester: Actor,
+  ): Promise<ReleaseRequest> {
+    const row = check(
+      await supabase
+        .from("release_requests")
+        .insert({
+          boot_id: input.bootId,
+          license_plate: boot.licensePlate,
+          make_model: boot.makeModel,
+          note: input.note ?? "",
+          status: "pending",
+          requested_by_id: requester.id,
+          requested_by_name: requester.name,
+          requested_at: new Date().toISOString(),
+          location_id: boot.locationId ?? null,
+        })
+        .select("*")
+        .single(),
+      "createReleaseRequest",
+    );
+    return rowToReleaseRequest(row);
   }
 
   // ---- Boots ----

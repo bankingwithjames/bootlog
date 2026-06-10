@@ -214,13 +214,13 @@ export async function registerRoutes(
         .status(400)
         .json({ message: fromZodError(parsed.error).toString() });
     }
-    const { username, password } = parsed.data;
+    const { username, password, rememberMe } = parsed.data;
     const row = await storage.getUserByUsername(username);
     if (!row || !row.active || !verifyPassword(password, row.passwordHash)) {
       return res.status(401).json({ message: "Invalid username or password" });
     }
     const { passwordHash, ...user } = row;
-    const token = await createToken(user.id);
+    const token = await createToken(user.id, rememberMe);
     res.json({ token, user });
   });
 

@@ -13,7 +13,11 @@ import type { Role, User } from "@shared/schema";
 type AuthState = {
   user: User | null;
   loading: boolean;
-  login: (username: string, password: string) => Promise<void>;
+  login: (
+    username: string,
+    password: string,
+    rememberMe?: boolean,
+  ) => Promise<void>;
   logout: () => Promise<void>;
   // Self-service password change. On success the in-memory user is updated
   // (which clears the forced-change gate).
@@ -68,12 +72,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => setOnUnauthorized(null);
   }, []);
 
-  const login = useCallback(async (username: string, password: string) => {
+  const login = useCallback(
+    async (username: string, password: string, rememberMe = false) => {
     setLoading(true);
     try {
       const res = await apiRequest("POST", "/api/auth/login", {
         username,
         password,
+        rememberMe,
       });
       const data = (await res.json()) as { token: string; user: User };
       setAuthToken(data.token);
@@ -83,7 +89,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } finally {
       setLoading(false);
     }
-  }, []);
+    },
+    [],
+  );
 
   const changePassword = useCallback(
     async (currentPassword: string, newPassword: string) => {

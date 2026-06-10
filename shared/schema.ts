@@ -53,6 +53,9 @@ export type User = Omit<typeof users.$inferSelect, "passwordHash">;
 export const loginSchema = z.object({
   username: z.string().trim().min(1, "Username is required"),
   password: z.string().min(1, "Password is required"),
+  // When true, the session is kept alive for an extended window (48h).
+  // Optional so older clients still work; defaults to false (shorter session).
+  rememberMe: z.boolean().optional().default(false),
 });
 export type LoginInput = z.infer<typeof loginSchema>;
 

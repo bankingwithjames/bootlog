@@ -30,12 +30,19 @@ export function verifyPassword(password: string, stored: string): boolean {
 // Tokens are stored in Postgres so a logged-in session survives server
 // restarts, sandbox sleep, and redeploys — the user stays logged in.
 // ---------------------------------------------------------------------------
-const TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 7; // 7 days
+// Default session window when "Keep me signed in" is NOT checked.
+const TOKEN_TTL_MS = 1000 * 60 * 60 * 12; // 12 hours
+// Extended session window when "Keep me signed in" IS checked (default 48h).
+const REMEMBER_ME_TTL_MS = 1000 * 60 * 60 * 48; // 48 hours
 
-export async function createToken(userId: number): Promise<string> {
+export async function createToken(
+  userId: number,
+  rememberMe = false,
+): Promise<string> {
   const token = randomBytes(32).toString("hex");
   const now = new Date();
-  const expires = new Date(now.getTime() + TOKEN_TTL_MS);
+  const ttl = rememberMe ? REMEMBER_ME_TTL_MS : TOKEN_TTL_MS;
+  const expires = new Date(now.getTime() + ttl);
   const { error } = await supabase.from("sessions").insert({
     token,
     user_id: userId,

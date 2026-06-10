@@ -97,9 +97,9 @@ export default function Login() {
           </div>
           <div>
             <CardTitle className="text-lg" data-testid="text-login-title">
-              Welcome - Login to Access
+              Welcome Back
             </CardTitle>
-            <CardDescription>Sign in to the boot attendant log</CardDescription>
+            <CardDescription>Login to Access</CardDescription>
           </div>
         </CardHeader>
         <CardContent>

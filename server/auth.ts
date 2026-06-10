@@ -31,7 +31,7 @@ export function verifyPassword(password: string, stored: string): boolean {
 // restarts, sandbox sleep, and redeploys — the user stays logged in.
 // ---------------------------------------------------------------------------
 // Default session window when "Keep me signed in" is NOT checked.
-const TOKEN_TTL_MS = 1000 * 60 * 60 * 12; // 12 hours
+const TOKEN_TTL_MS = 1000 * 60 * 60 * 2; // 2 hours
 // Extended session window when "Keep me signed in" IS checked (default 48h).
 const REMEMBER_ME_TTL_MS = 1000 * 60 * 60 * 48; // 48 hours
 

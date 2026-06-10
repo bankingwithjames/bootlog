@@ -46,7 +46,7 @@ export default function Login() {
 
   const form = useForm<LoginInput>({
     resolver: zodResolver(loginSchema),
-    defaultValues: { username: "", password: "", rememberMe: true },
+    defaultValues: { username: "", password: "", rememberMe: false },
   });
 
   async function onSubmit(values: LoginInput) {

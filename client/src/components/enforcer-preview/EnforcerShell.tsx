@@ -162,7 +162,7 @@ export function EnforcerShell({
   return (
     <div
       className="flex min-h-screen flex-col"
-      style={{ background: ENF.fieldBg, color: ENF.ink, fontFamily: ENF_FONT }}
+      style={{ background: "#fff", color: ENF.ink, fontFamily: ENF_FONT }}
       data-testid="enforcer-shell"
     >
       {/* Header — dark navy gradient (matches attendant field mode) */}

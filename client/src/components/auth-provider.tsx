@@ -13,6 +13,7 @@ import {
   getAuthToken,
   setAuthToken,
   setOnUnauthorized,
+  validateSession,
 } from "@/lib/queryClient";
 import type { Role, User } from "@shared/schema";
 
@@ -59,29 +60,52 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // there's nothing to restore, so loading starts false.
   const [loading, setLoading] = useState<boolean>(() => getAuthToken() != null);
 
-  // On mount, if a persisted token exists, validate it via GET /api/auth/me to
+  // On mount, if a persisted token exists, validate it against the backend to
   // restore the session (this is what makes "keep me signed in" actually keep
-  // the user signed in across reloads). On any failure we clear the token and
-  // fall back to the login screen.
+  // the user signed in across reloads).
+  //
+  // The published backend sandbox auto-pauses when idle and can take a while to
+  // wake on the first request after a reload. During that window every request
+  // — including session validation — fails transiently (5xx / network). We must
+  // NOT treat that as "logged out": the session is still valid server-side, the
+  // backend is just asleep. So we only clear the token + show login on a
+  // CONFIRMED 401. On a transient result we keep the token, stay on the
+  // restoring screen, and retry until the backend wakes (or we hit a generous
+  // overall cap as a final safety net).
   useEffect(() => {
     let cancelled = false;
     const token = getAuthToken();
-    if (!token) return;
+    if (!token) {
+      setLoading(false);
+      return;
+    }
     (async () => {
-      try {
-        const res = await apiRequest("GET", "/api/auth/me");
-        const data = (await res.json()) as { user: User };
-        if (!cancelled) setUser(data.user);
-      } catch {
-        // Expired/invalid token, or backend unreachable after retries. Clear it
-        // and present the login screen.
-        if (!cancelled) {
+      // Up to ~10 full validation cycles; each cycle itself retries with long
+      // backoff. This comfortably outlasts any realistic cold start while still
+      // terminating if the backend is truly down for an extended period.
+      const maxCycles = 10;
+      for (let cycle = 0; cycle < maxCycles && !cancelled; cycle++) {
+        const result = await validateSession();
+        if (cancelled) return;
+        if (result.kind === "ok") {
+          const data = result.data as { user: User };
+          setUser(data.user);
+          setLoading(false);
+          return;
+        }
+        if (result.kind === "unauthorized") {
+          // Token genuinely dead — clear it and show login.
           setAuthToken(null);
           setUser(null);
+          setLoading(false);
+          return;
         }
-      } finally {
-        if (!cancelled) setLoading(false);
+        // transient: keep the token, stay on the restoring screen, wait, retry.
+        await new Promise((r) => setTimeout(r, 3000));
       }
+      // Safety net: backend never came back. Keep the token persisted (so a
+      // manual reload can retry) but stop the spinner so the UI isn't stuck.
+      if (!cancelled) setLoading(false);
     })();
     return () => {
       cancelled = true;

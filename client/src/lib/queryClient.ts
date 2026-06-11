@@ -80,11 +80,22 @@ function authHeaders(base: Record<string, string> = {}): Record<string, string> 
   return h;
 }
 
+// Error carrying the HTTP status so callers can distinguish a genuine 401
+// (log out) from a transient 5xx / cold-start failure (keep session, retry).
+export class ApiError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
 async function throwIfResNotOk(res: Response) {
   if (!res.ok) {
     if (res.status === 401) handleUnauthorized();
     const text = (await res.text()) || res.statusText;
-    throw new Error(`${res.status}: ${text}`);
+    throw new ApiError(res.status, `${res.status}: ${text}`);
   }
 }
 
@@ -104,7 +115,7 @@ function isColdStartStatus(status: number): boolean {
 async function fetchWithRetry(
   input: string,
   init: RequestInit,
-  opts: { retries?: number; retryAuth?: boolean } = {},
+  opts: { retries?: number; retryAuth?: boolean; delays?: number[] } = {},
 ): Promise<Response> {
   const retries = opts.retries ?? 4;
   // When a token is attached, a 401 during the cold-start burst is very likely
@@ -114,7 +125,7 @@ async function fetchWithRetry(
   // surfaced normally.
   const retryAuth = opts.retryAuth ?? false;
   // Backoff schedule (ms) tuned to cover a typical cold-start window.
-  const delays = [500, 1500, 3000, 5000];
+  const delays = opts.delays ?? [500, 1500, 3000, 5000];
   let lastErr: unknown;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
@@ -138,6 +149,49 @@ async function fetchWithRetry(
   }
   // Exhausted retries — fall through with one final attempt.
   return fetch(input, init);
+}
+
+// Validate the persisted token against the backend to restore a session on
+// reload. This is the cold-start-critical path: a sleeping published sandbox
+// can take far longer than a normal request burst to wake, returning 5xx /
+// network errors the entire time. We retry generously (long backoff window)
+// and, crucially, return a discriminated result so the caller NEVER logs the
+// user out on a transient failure — only on a confirmed 401 (token dead).
+export type SessionCheck =
+  | { kind: "ok"; data: unknown }
+  | { kind: "unauthorized" } // genuine 401 after retries -> log out
+  | { kind: "transient" }; // backend never woke -> keep token, retry later
+
+export async function validateSession(): Promise<SessionCheck> {
+  if (!authToken) return { kind: "unauthorized" };
+  // Long window: ~ up to ~45s of cumulative backoff to outlast a cold start.
+  const delays = [500, 1000, 2000, 3000, 5000, 7000, 10000, 12000];
+  let res: Response;
+  try {
+    // retryAuth is intentionally FALSE here: the backend now returns 503 (not
+    // 401) for transient session-lookup failures, so a 401 from /me is
+    // authoritative — the token is genuinely dead. We only retry 5xx / network
+    // errors. This keeps a real logout instant instead of waiting out the full
+    // cold-start backoff window.
+    res = await fetchWithRetry(
+      `${API_BASE}/api/auth/me`,
+      { headers: authHeaders() },
+      { retries: delays.length, retryAuth: false, delays },
+    );
+  } catch {
+    // Never reached the backend after all retries -> transient, keep session.
+    return { kind: "transient" };
+  }
+  if (res.ok) {
+    try {
+      return { kind: "ok", data: await res.json() };
+    } catch {
+      return { kind: "transient" };
+    }
+  }
+  if (res.status === 401) return { kind: "unauthorized" };
+  // 5xx / other after retries -> transient.
+  return { kind: "transient" };
 }
 
 // Guarded logout-on-401. Because cold-start bursts can produce spurious 401s

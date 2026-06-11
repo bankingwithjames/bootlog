@@ -24,6 +24,9 @@ import {
   checkInShiftSchema,
   checkOutShiftSchema,
   type PaidSnapshot,
+  enforcementActionSchema,
+  ENFORCEMENT_STAGES,
+  type EnforcementStage,
 } from "@shared/schema";
 import { fromZodError } from "zod-validation-error";
 import { fetchPaidCars, normalizePlate, type PaidCar } from "./stripe";
@@ -1323,5 +1326,272 @@ export async function registerRoutes(
     }
   });
 
+  // =========================================================================
+  // Enforcer Mobile Preview API (preview-only, flag-gated, additive)
+  // =========================================================================
+  // These endpoints power the /preview/enforcer-mobile experience. They are
+  // registered ONLY when ENABLE_ENFORCER_MOBILE_PREVIEW is set, so production
+  // deployments without the flag never expose them. All reads reuse the same
+  // location-scoping + visible-window rules as the live endpoints. Enforcement
+  // actions reuse the existing enforcer-only boot lifecycle and never bypass
+  // role checks.
+  if (process.env.ENABLE_ENFORCER_MOBILE_PREVIEW === "1") {
+    registerEnforcerPreviewRoutes(app);
+  }
+
   return httpServer;
+}
+
+// ---------------------------------------------------------------------------
+// Enforcer Mobile Preview route registration (kept in a separate function so
+// the live route block above is visually unchanged). Reuses module-scoped
+// helpers: actorOf, allowedLocationIds, resolvePaidCars, todayKey, requireRole.
+// ---------------------------------------------------------------------------
+function registerEnforcerPreviewRoutes(app: Express) {
+  // Derive the richer lifecycle stage for a boot from existing data + the
+  // optional persisted hint. `paidPlates` is the normalized set of plates that
+  // paid (Stripe + manual) for the relevant day.
+  function deriveStage(
+    boot: { status: string; enforcementStage: string | null; licensePlate: string },
+    paidPlates: Set<string>,
+  ): EnforcementStage {
+    const hint = boot.enforcementStage as EnforcementStage | null;
+    // A stored hint wins only when it is still consistent with live status.
+    if (hint && ENFORCEMENT_STAGES.includes(hint)) {
+      // payment_pending / reopened / review_needed are hint-only states that
+      // sit "on top of" an active (booted) record.
+      if (
+        (hint === "payment_pending" ||
+          hint === "reopened" ||
+          hint === "review_needed") &&
+        boot.status === "booted"
+      ) {
+        return hint;
+      }
+    }
+    switch (boot.status) {
+      case "released":
+        return "released";
+      case "settled":
+        return "paid";
+      case "completed":
+        return "completed";
+      case "booted":
+      default:
+        return "booted";
+    }
+  }
+
+  // GET /api/preview/enforcer/cases?date=YYYY-MM-DD&tz=<min>
+  // Active + recent enforcement cases for the enforcer's lots, enriched with a
+  // derived lifecycle stage and live paid status for the requested day.
+  app.get(
+    "/api/preview/enforcer/cases",
+    requireRole("enforcer", "admin"),
+    async (req, res) => {
+      const tz = Number(req.query.tz ?? 0) || 0;
+      const date = String(req.query.date || todayKey(tz));
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        return res.status(400).json({ message: "date must be YYYY-MM-DD" });
+      }
+      let boots = await storage.getBoots();
+      const allowed = await allowedLocationIds(req);
+      if (allowed) {
+        const allowedSet = new Set(allowed);
+        boots = boots.filter(
+          (b) => b.locationId == null || allowedSet.has(b.locationId),
+        );
+      }
+      // Live paid plates for the day (best-effort; tolerate Stripe hiccups).
+      let paidPlates = new Set<string>();
+      let stripeOk = true;
+      try {
+        const { cars } = await resolvePaidCars(date, tz);
+        paidPlates = new Set(
+          cars.map((p) => normalizePlate(p.licensePlate)).filter(Boolean),
+        );
+      } catch {
+        // Stripe (or the snapshot fallback) failed: payment data is stale.
+        // The UI shows a stale-Stripe banner and suppresses paid hints.
+        stripeOk = false;
+      }
+      const cases = boots.map((b) => {
+        const np = normalizePlate(b.licensePlate);
+        const stage = deriveStage(b, paidPlates);
+        return {
+          id: b.id,
+          licensePlate: b.licensePlate,
+          makeModel: b.makeModel,
+          color: b.color,
+          bootedAt: b.bootedAt,
+          bootFee: b.bootFee,
+          amountCollected: b.amountCollected,
+          status: b.status,
+          stage,
+          locationId: b.locationId,
+          photos: b.photos,
+          // Guardrail signal: this booted plate appears paid for the day.
+          paidConflict: stage === "booted" && paidPlates.has(np),
+          lastActionByName: b.lastActionByName,
+        };
+      });
+      res.json({ date, cases, stripeOk });
+    },
+  );
+
+  // GET /api/preview/enforcer/case/:id — single case + append-only timeline.
+  app.get(
+    "/api/preview/enforcer/case/:id",
+    requireRole("enforcer", "admin"),
+    async (req, res) => {
+      const id = Number(req.params.id);
+      if (Number.isNaN(id)) return res.status(400).json({ message: "Invalid id" });
+      const boot = (await storage.getBoots()).find((b) => b.id === id);
+      if (!boot) return res.status(404).json({ message: "Case not found" });
+      const allowed = await allowedLocationIds(req);
+      if (
+        allowed &&
+        boot.locationId != null &&
+        !allowed.includes(boot.locationId)
+      ) {
+        return res
+          .status(403)
+          .json({ message: "This case is not at one of your lots." });
+      }
+      const events = await storage.getEnforcementEvents(id);
+      let evidenceLabels: unknown = [];
+      try {
+        evidenceLabels = JSON.parse(boot.evidenceLabels || "[]");
+      } catch {
+        evidenceLabels = [];
+      }
+
+      // Derive the case stage exactly like the list endpoint so the detail view
+      // shows the right actions. Resolve paid plates best-effort for the boot's
+      // day; tolerate Stripe hiccups (the stage just won't reflect a paid hint).
+      const tz = Number(req.query.tz) || 0;
+      const day = (boot.bootedAt || "").slice(0, 10) || todayKey(tz);
+      let paidPlates = new Set<string>();
+      let stripeOk = true;
+      try {
+        const { cars } = await resolvePaidCars(day, tz);
+        paidPlates = new Set(
+          cars.map((p) => normalizePlate(p.licensePlate)).filter(Boolean),
+        );
+      } catch {
+        stripeOk = false;
+      }
+      const stage = deriveStage(boot, paidPlates);
+      const np = normalizePlate(boot.licensePlate);
+
+      // Shape the case to match the list endpoint (parsed arrays + derived
+      // fields) so the frontend reads stage/photos/evidence consistently.
+      const shapedCase = {
+        ...boot,
+        stage,
+        evidenceLabels,
+        paidConflict: stage === "booted" && paidPlates.has(np),
+        stripeOk,
+      };
+      res.json({ case: shapedCase, events, evidenceLabels });
+    },
+  );
+
+  // POST /api/preview/enforcer/case/:id/action
+  // Advance a case to a new stage. Persists the stage hint + evidence labels,
+  // appends an audit event, and mirrors to the live boot status when the stage
+  // maps onto one (paid/completed/released/reopened) — reusing the same write
+  // path the live enforcer already has.
+  app.post(
+    "/api/preview/enforcer/case/:id/action",
+    requireRole("enforcer", "admin"),
+    async (req, res) => {
+      const id = Number(req.params.id);
+      if (Number.isNaN(id)) return res.status(400).json({ message: "Invalid id" });
+      const parsed = enforcementActionSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res
+          .status(400)
+          .json({ message: fromZodError(parsed.error).toString() });
+      }
+      const boot = (await storage.getBoots()).find((b) => b.id === id);
+      if (!boot) return res.status(404).json({ message: "Case not found" });
+      const allowed = await allowedLocationIds(req);
+      if (
+        allowed &&
+        boot.locationId != null &&
+        !allowed.includes(boot.locationId)
+      ) {
+        return res
+          .status(403)
+          .json({ message: "This case is not at one of your lots." });
+      }
+      const { stage, note, evidenceLabels, amountCollected } = parsed.data;
+      const actor = actorOf(req);
+      const fee = boot.bootFee ?? 0;
+
+      // Mirror to the live boot lifecycle where the stage has a canonical status.
+      if (stage === "completed") {
+        await storage.updateBootStatus(
+          id,
+          "completed",
+          amountCollected != null ? amountCollected : fee,
+          new Date().toISOString(),
+          actor,
+        );
+      } else if (stage === "paid") {
+        // "paid" with a partial amount = settled; full/none = completed.
+        if (amountCollected != null && amountCollected > 0 && amountCollected < fee) {
+          await storage.updateBootStatus(
+            id,
+            "settled",
+            amountCollected,
+            new Date().toISOString(),
+            actor,
+          );
+        } else {
+          await storage.updateBootStatus(
+            id,
+            "completed",
+            amountCollected != null ? amountCollected : fee,
+            new Date().toISOString(),
+            actor,
+          );
+        }
+      } else if (stage === "released") {
+        await storage.updateBootStatus(id, "released", 0, new Date().toISOString(), actor);
+      } else if (stage === "reopened" || stage === "booted") {
+        await storage.updateBootStatus(id, "booted", 0, null, actor);
+      }
+
+      // Persist the stage hint (for hint-only states) + any evidence labels.
+      const hintStages: EnforcementStage[] = [
+        "payment_pending",
+        "reopened",
+        "review_needed",
+      ];
+      const enforcementStage = hintStages.includes(stage) ? stage : null;
+      const evidencePatch =
+        evidenceLabels != null ? JSON.stringify(evidenceLabels) : undefined;
+      const updated = await storage.setBootEnforcement(
+        id,
+        { enforcementStage, ...(evidencePatch !== undefined ? { evidenceLabels: evidencePatch } : {}) },
+        actor,
+      );
+
+      // Append the immutable audit event.
+      await storage.addEnforcementEvent({
+        bootId: id,
+        stage,
+        note: note ?? null,
+        actorId: actor?.id ?? null,
+        actorName: actor?.name ?? null,
+        createdAt: new Date().toISOString(),
+      });
+
+      const fresh = (await storage.getBoots()).find((b) => b.id === id) ?? updated;
+      const events = await storage.getEnforcementEvents(id);
+      res.json({ case: fresh, events });
+    },
+  );
 }

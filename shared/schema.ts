@@ -279,6 +279,14 @@ export const boots = sqliteTable("boots", {
   // boots placed before locations existed (and "No location" picks) stay null
   // and are excluded from per-location enforcement overview counts.
   locationId: integer("location_id"),
+  // ---- Enforcer Mobile Preview (additive, nullable; live code ignores it) ----
+  // Optional richer-lifecycle hint. NULL = derive the stage from `status`.
+  // Only the preview reads/writes this; the live 4-state `status` is unchanged.
+  enforcementStage: text("enforcement_stage"),
+  // Optional structured evidence labels captured in the field, stored as a JSON
+  // array of { label, photoIndex }. Separate from `photos` so the live photo
+  // array stays byte-for-byte untouched.
+  evidenceLabels: text("evidence_labels").default("[]"),
 });
 
 export const insertBootSchema = createInsertSchema(boots)
@@ -295,6 +303,8 @@ export const insertBootSchema = createInsertSchema(boots)
     lastActionById: true,
     lastActionByName: true,
     feePaid: true,
+    enforcementStage: true,
+    evidenceLabels: true,
   })
   .extend({
     // Photos arrive as an array of data-URL strings; capped at MAX_BOOT_PHOTOS.
@@ -326,6 +336,8 @@ export type Boot = Omit<typeof boots.$inferSelect, "photos"> & {
   longitude: number | null;
   color: string | null;
   locationId: number | null;
+  enforcementStage: string | null;
+  evidenceLabels: string | null;
 };
 
 // Payload for resolving / updating a boot's enforcement status.
@@ -584,3 +596,79 @@ export const checkOutShiftSchema = z.object({
   longitude: z.number().min(-180).max(180).nullable().optional(),
 });
 export type CheckOutShiftInput = z.infer<typeof checkOutShiftSchema>;
+
+// =============================================================================
+// Enforcer Mobile Preview (preview-only, additive)
+// =============================================================================
+// The preview expresses a richer field-enforcement lifecycle than the live
+// 4-state `boots.status`. Most stages are DERIVED at read time from existing
+// data (boots + boot_requests + release_requests + Stripe paid status); only a
+// few "hint" stages are persisted in boots.enforcementStage. Live code never
+// reads these, so the attendant/admin/enforcer experience is unchanged.
+
+export const ENFORCEMENT_STAGES = [
+  "draft", // a boot request exists, not yet acted on
+  "review_needed", // flagged for review (paid-plate match / mismatch)
+  "pending_enforcement", // request initiated, boot not yet placed
+  "booted", // boot physically placed, active
+  "payment_pending", // booted + enforcer marked awaiting payment
+  "paid", // settled or completed
+  "release_pending", // open release request
+  "released", // boot removed for no fee
+  "completed", // paid in full, closed
+  "cancelled", // request dismissed
+  "reopened", // a resolved case re-opened to active
+] as const;
+export type EnforcementStage = (typeof ENFORCEMENT_STAGES)[number];
+
+// Human labels + the semantic color family each stage maps to (per the plan's
+// color system). Consumed by the preview UI badges.
+export const ENFORCEMENT_STAGE_META: Record<
+  EnforcementStage,
+  { label: string; tone: "neutral" | "review" | "active" | "paid" | "released" | "info" }
+> = {
+  draft: { label: "Draft", tone: "neutral" },
+  review_needed: { label: "Review needed", tone: "review" },
+  pending_enforcement: { label: "Pending enforcement", tone: "review" },
+  booted: { label: "Booted", tone: "active" },
+  payment_pending: { label: "Payment pending", tone: "review" },
+  paid: { label: "Paid", tone: "paid" },
+  release_pending: { label: "Release pending", tone: "review" },
+  released: { label: "Released", tone: "released" },
+  completed: { label: "Completed", tone: "paid" },
+  cancelled: { label: "Cancelled", tone: "neutral" },
+  reopened: { label: "Reopened", tone: "active" },
+};
+
+// Structured evidence label captured against a photo in the field. Stored as a
+// JSON array in boots.evidenceLabels.
+export const evidenceLabelSchema = z.object({
+  label: z.string().trim().min(1).max(60),
+  photoIndex: z.coerce.number().int().min(0).max(MAX_BOOT_PHOTOS - 1).nullable().optional(),
+});
+export type EvidenceLabel = z.infer<typeof evidenceLabelSchema>;
+
+// Append-only audit timeline for enforcement actions (enforcement_events).
+export const enforcementEvents = sqliteTable("enforcement_events", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  bootId: integer("boot_id"),
+  requestId: integer("request_id"),
+  stage: text("stage").notNull(),
+  note: text("note"),
+  actorId: integer("actor_id"),
+  actorName: text("actor_name"),
+  createdAt: text("created_at").notNull(),
+});
+export type EnforcementEvent = typeof enforcementEvents.$inferSelect;
+
+// Payload the preview sends when an enforcer advances a case to a new stage.
+export const enforcementActionSchema = z.object({
+  // The stage being entered (drives both the persisted hint and the audit row).
+  stage: z.enum(ENFORCEMENT_STAGES),
+  note: z.string().trim().max(500).optional(),
+  // Optional structured evidence labels to persist on the boot.
+  evidenceLabels: z.array(evidenceLabelSchema).max(MAX_BOOT_PHOTOS).optional(),
+  // Optional collected amount when the stage implies a payment (paid/completed).
+  amountCollected: z.coerce.number().min(0).optional(),
+});
+export type EnforcementActionInput = z.infer<typeof enforcementActionSchema>;

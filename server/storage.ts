@@ -24,6 +24,7 @@ import type {
   CashCollection,
   InsertCashCollection,
   CashSummary,
+  EnforcementEvent,
 } from "@shared/schema";
 import { supabase } from "./supabase";
 import { hashPassword } from "./auth";
@@ -89,6 +90,9 @@ function rowToBoot(row: any): Boot {
     lastActionByName: row.last_action_by_name ?? null,
     feePaid: row.fee_paid ?? 0,
     locationId: row.location_id ?? null,
+    // Enforcer Mobile Preview (additive; null on existing rows).
+    enforcementStage: row.enforcement_stage ?? null,
+    evidenceLabels: row.evidence_labels ?? null,
   } as Boot;
 }
 
@@ -235,6 +239,23 @@ export interface IStorage {
     actor?: Actor,
   ): Promise<Boot | undefined>;
   deleteBoot(id: number): Promise<{ changes: number }>;
+  // Enforcer Mobile Preview (additive): persist a stage hint + evidence labels
+  // on a boot, and append an immutable audit-timeline event.
+  setBootEnforcement(
+    id: number,
+    patch: { enforcementStage?: string | null; evidenceLabels?: string | null },
+    actor?: Actor,
+  ): Promise<Boot | undefined>;
+  addEnforcementEvent(input: {
+    bootId: number | null;
+    requestId?: number | null;
+    stage: string;
+    note?: string | null;
+    actorId?: number | null;
+    actorName?: string | null;
+    createdAt: string;
+  }): Promise<EnforcementEvent>;
+  getEnforcementEvents(bootId: number): Promise<EnforcementEvent[]>;
   // Parking locations (multi-location support)
   getLocations(): Promise<LocationWithStaff[]>;
   createLocation(input: InsertLocation): Promise<LocationWithStaff>;
@@ -613,6 +634,91 @@ export class DatabaseStorage implements IStorage {
       "deleteBoot",
     );
     return { changes: (rows ?? []).length };
+  }
+
+  // ---- Enforcer Mobile Preview (additive) ----
+  async setBootEnforcement(
+    id: number,
+    patch: { enforcementStage?: string | null; evidenceLabels?: string | null },
+    actor?: Actor,
+  ): Promise<Boot | undefined> {
+    const set: Record<string, unknown> = {};
+    if (patch.enforcementStage !== undefined)
+      set.enforcement_stage = patch.enforcementStage;
+    if (patch.evidenceLabels !== undefined)
+      set.evidence_labels = patch.evidenceLabels;
+    if (actor) {
+      set.last_action_by_id = actor.id;
+      set.last_action_by_name = actor.name;
+    }
+    if (Object.keys(set).length === 0) {
+      const existing = (await this.getBoots()).find((b) => b.id === id);
+      return existing;
+    }
+    const rows = check(
+      await supabase.from("boots").update(set).eq("id", id).select("*"),
+      "setBootEnforcement",
+    );
+    const row = (rows ?? [])[0];
+    return row ? rowToBoot(row) : undefined;
+  }
+
+  async addEnforcementEvent(input: {
+    bootId: number | null;
+    requestId?: number | null;
+    stage: string;
+    note?: string | null;
+    actorId?: number | null;
+    actorName?: string | null;
+    createdAt: string;
+  }): Promise<EnforcementEvent> {
+    const row = check(
+      await supabase
+        .from("enforcement_events")
+        .insert({
+          boot_id: input.bootId,
+          request_id: input.requestId ?? null,
+          stage: input.stage,
+          note: input.note ?? null,
+          actor_id: input.actorId ?? null,
+          actor_name: input.actorName ?? null,
+          created_at: input.createdAt,
+        })
+        .select("*")
+        .single(),
+      "addEnforcementEvent",
+    );
+    return {
+      id: row.id,
+      bootId: row.boot_id ?? null,
+      requestId: row.request_id ?? null,
+      stage: row.stage,
+      note: row.note ?? null,
+      actorId: row.actor_id ?? null,
+      actorName: row.actor_name ?? null,
+      createdAt: row.created_at,
+    } as EnforcementEvent;
+  }
+
+  async getEnforcementEvents(bootId: number): Promise<EnforcementEvent[]> {
+    const rows = check(
+      await supabase
+        .from("enforcement_events")
+        .select("*")
+        .eq("boot_id", bootId)
+        .order("created_at", { ascending: true }),
+      "getEnforcementEvents",
+    );
+    return (rows ?? []).map((row: any) => ({
+      id: row.id,
+      bootId: row.boot_id ?? null,
+      requestId: row.request_id ?? null,
+      stage: row.stage,
+      note: row.note ?? null,
+      actorId: row.actor_id ?? null,
+      actorName: row.actor_name ?? null,
+      createdAt: row.created_at,
+    })) as EnforcementEvent[];
   }
 
   // ---- Parking locations ----

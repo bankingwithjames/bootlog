@@ -11,6 +11,13 @@ import Home from "@/pages/home";
 import Login from "@/pages/login";
 import ChangePassword from "@/pages/change-password";
 import NotFound from "@/pages/not-found";
+import { EnforcerPreview } from "@/components/enforcer-preview/EnforcerPreview";
+
+// Build-time feature flag. The mobile field-enforcer preview is an isolated,
+// direct-URL-only experience that never appears in production navigation. It is
+// only compiled into the bundle when VITE_ENABLE_ENFORCER_MOBILE_PREVIEW is set.
+const ENFORCER_MOBILE_PREVIEW_ENABLED =
+  import.meta.env.VITE_ENABLE_ENFORCER_MOBILE_PREVIEW === "1";
 
 class ErrorBoundary extends Component<
   { children: ReactNode },
@@ -55,10 +62,21 @@ class ErrorBoundary extends Component<
   }
 }
 
+// Route guard for the preview: only enforcers and admins can view it, even when
+// the build flag is on. Anyone else falls through to NotFound.
+function EnforcerPreviewRoute() {
+  const { is } = useAuth();
+  if (!is("enforcer", "admin")) return <NotFound />;
+  return <EnforcerPreview />;
+}
+
 function AppRouter() {
   return (
     <Switch>
       <Route path="/" component={Home} />
+      {ENFORCER_MOBILE_PREVIEW_ENABLED && (
+        <Route path="/preview/enforcer-mobile" component={EnforcerPreviewRoute} />
+      )}
       <Route component={NotFound} />
     </Switch>
   );

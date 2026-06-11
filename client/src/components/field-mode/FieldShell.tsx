@@ -9,6 +9,7 @@ import {
   Search as SearchIcon,
   Plus,
 } from "lucide-react";
+import logoMark from "@assets/logo-mark.png";
 
 // Attendant Field Mode navigation. Only "home" is functional in Page 1;
 // the remaining views are placeholders that Pages 2-5 fill in.
@@ -86,35 +87,18 @@ export function FieldShell({
       >
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-[9px]">
-            <div
-              className="flex h-8 w-8 items-center justify-center rounded-[9px]"
-              style={{ background: FIELD.orange }}
+            {/* Company logo — the official Millennialz Parking mark on a white
+                tile (matches the desktop header treatment in home.tsx). */}
+            <span
+              className="flex h-8 w-8 items-center justify-center overflow-hidden rounded-[9px] bg-white"
               data-testid="field-logo"
-              aria-label="BootLog"
             >
-              {/* BootLog mark — a wheel clamp ("boot") around a tire: the
-                  circular ring is the wheel, the angled bar + jaw is the clamp
-                  that locks it. Geometric, monochrome, legible at 32px. */}
-              <svg
-                viewBox="0 0 24 24"
-                className="h-[19px] w-[19px]"
-                fill="none"
-                stroke="#fff"
-                strokeWidth={2}
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                aria-hidden="true"
-              >
-                {/* wheel / tire */}
-                <circle cx="11" cy="13" r="6" />
-                {/* hub */}
-                <circle cx="11" cy="13" r="1.4" fill="#fff" stroke="none" />
-                {/* clamp arm reaching up-right */}
-                <path d="M15.2 8.8 19 5" />
-                {/* clamp jaw / lock head */}
-                <rect x="17.5" y="3" width="4" height="4" rx="1" />
-              </svg>
-            </div>
+              <img
+                src={logoMark}
+                alt="Millennialz Parking, LLC"
+                className="h-full w-full object-contain p-0.5"
+              />
+            </span>
             <div className="leading-[1.15]">
               <div className="text-sm font-bold" data-testid="field-user-name">
                 {userName}

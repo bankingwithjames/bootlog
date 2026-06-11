@@ -13,14 +13,13 @@ import {
   KeyRound,
   CalendarCheck,
   Megaphone,
-  ShieldCheck,
+  Monitor,
 } from "lucide-react";
 import type {
   BootRequest,
   ReleaseRequest,
   Shift,
   CashSummary,
-  AppSettings,
 } from "@shared/schema";
 import { apiRequest } from "@/lib/queryClient";
 import { FIELD, FIELD_FONT, FIELD_MONO } from "./FieldShell";
@@ -312,16 +311,16 @@ export function NotificationCenter({
 // ---------------------------------------------------------------------------
 export function AccountMenu({
   userName,
-  settings,
   onClose,
   changePassword,
   onLogout,
+  onSwitchToDesktop,
 }: {
   userName: string;
-  settings: AppSettings | null;
   onClose: () => void;
   changePassword: (current: string, next: string) => Promise<void>;
   onLogout: () => void;
+  onSwitchToDesktop?: () => void;
 }) {
   const [pwOpen, setPwOpen] = useState(false);
   const [curPw, setCurPw] = useState("");
@@ -417,22 +416,20 @@ export function AccountMenu({
         style={{ background: "#fff", border: `1px solid ${FIELD.line}` }}
         data-testid="menu-settings"
       >
-        <div className="flex items-center justify-between px-3.5 py-3" style={{ borderBottom: `1px solid ${FIELD.line}` }}>
-          <span className="flex items-center gap-2 text-[13px]" style={{ color: FIELD.ink2 }}>
-            <ShieldCheck className="h-4 w-4" style={{ color: FIELD.ink3 }} /> History visible
-          </span>
-          <span className="text-[13px] font-semibold" style={{ color: FIELD.ink }}>
-            {settings ? `${settings.historyVisibleDays} day${settings.historyVisibleDays === 1 ? "" : "s"}` : "—"}
-          </span>
-        </div>
-        <div className="flex items-center justify-between px-3.5 py-3" style={{ borderBottom: `1px solid ${FIELD.line}` }}>
-          <span className="flex items-center gap-2 text-[13px]" style={{ color: FIELD.ink2 }}>
-            <Banknote className="h-4 w-4" style={{ color: FIELD.ink3 }} /> Show financials
-          </span>
-          <span className="text-[13px] font-semibold" style={{ color: FIELD.ink }}>
-            {settings ? (settings.showFinancialsToStaff ? "On" : "Off") : "—"}
-          </span>
-        </div>
+        {onSwitchToDesktop && (
+          <button
+            type="button"
+            onClick={onSwitchToDesktop}
+            className="flex w-full items-center justify-between px-3.5 py-3 text-left"
+            style={{ borderBottom: `1px solid ${FIELD.line}` }}
+            data-testid="button-menu-switch-desktop"
+          >
+            <span className="flex items-center gap-2 text-[13px] font-semibold" style={{ color: FIELD.ink }}>
+              <Monitor className="h-4 w-4" style={{ color: FIELD.accent }} /> Switch to desktop view
+            </span>
+            <span className="text-[12px]" style={{ color: FIELD.ink3 }}>›</span>
+          </button>
+        )}
         <button
           type="button"
           onClick={() => {
@@ -604,7 +601,7 @@ export function AttendantWidget({
         </div>
         <div className="min-w-0 flex-1">
           <div className="text-[11.5px] font-semibold uppercase tracking-[0.04em]" style={{ color: FIELD.ink3 }}>
-            Cash owed to admin
+            Cash owed to bank
           </div>
           <div
             className="text-[22px] font-extrabold leading-tight"

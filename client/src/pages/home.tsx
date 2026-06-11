@@ -496,6 +496,9 @@ export default function Home() {
   // toggle lets anyone force the full desktop layout (and back).
   type ViewMode = "mobile" | "desktop";
   const [viewMode, setViewMode] = useState<ViewMode>(() => {
+    // Attendants always default to the mobile field dashboard, regardless of
+    // viewport width — they can switch to the desktop layout via the menu.
+    if (isAttendant) return "mobile";
     if (typeof window !== "undefined" && window.matchMedia) {
       return window.matchMedia("(max-width: 768px)").matches
         ? "mobile"
@@ -505,9 +508,12 @@ export default function Home() {
   });
   // Track whether the user has manually overridden auto-detect. Until they do,
   // we keep following the viewport so rotating / resizing stays in sync.
-  const viewModeOverridden = useRef(false);
+  // Attendants start overridden so the viewport never forces them off mobile.
+  const viewModeOverridden = useRef(isAttendant);
   useEffect(() => {
     if (typeof window === "undefined" || !window.matchMedia) return;
+    // Attendants are pinned to mobile by default; do not auto-follow viewport.
+    if (isAttendant) return;
     const mql = window.matchMedia("(max-width: 768px)");
     const onChange = (e: MediaQueryListEvent) => {
       if (!viewModeOverridden.current) {
@@ -516,7 +522,7 @@ export default function Home() {
     };
     mql.addEventListener("change", onChange);
     return () => mql.removeEventListener("change", onChange);
-  }, []);
+  }, [isAttendant]);
   const isMobileView = viewMode === "mobile";
   const toggleViewMode = () => {
     viewModeOverridden.current = true;
@@ -1163,6 +1169,7 @@ export default function Home() {
         locations={locations}
         myLocationIds={myLocationIds}
         canSeeFinancials={canSeeFinancials}
+        onSwitchToDesktop={toggleViewMode}
       />
     );
   }

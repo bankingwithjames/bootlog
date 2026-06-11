@@ -24,7 +24,7 @@ import {
   CashTracker,
   type FieldNotification,
 } from "./FieldOverlays";
-import type { CashSummary, AppSettings } from "@shared/schema";
+import type { CashSummary } from "@shared/schema";
 import { useAuth } from "@/components/auth-provider";
 
 // Shape of a paid car (from /api/paid-cars). Mirrors the full PaidCar type in
@@ -575,6 +575,7 @@ export function FieldMode({
   locations,
   myLocationIds,
   canSeeFinancials,
+  onSwitchToDesktop,
 }: {
   userName: string;
   userId: number;
@@ -583,6 +584,7 @@ export function FieldMode({
   locations: Location[];
   myLocationIds: number[];
   canSeeFinancials: boolean;
+  onSwitchToDesktop?: () => void;
 }) {
   const [view, setView] = useState<FieldView>("home");
   // Overlay open state for the bell (notification center) and hamburger (account
@@ -590,16 +592,8 @@ export function FieldMode({
   const [notifOpen, setNotifOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
 
-  // Account context for the hamburger menu (Settings + change password + logout).
+  // Account context for the hamburger menu (change password + logout).
   const { changePassword, logout } = useAuth();
-  const settingsQuery = useQuery<AppSettings>({
-    queryKey: ["/api/settings"],
-    queryFn: async () => {
-      const res = await apiRequest("GET", "/api/settings");
-      return res.json();
-    },
-    staleTime: 60_000,
-  });
 
   // Notification center feed (resolved boot/release requests this attendant
   // raised) + the attendant's running cash-owed total.
@@ -776,10 +770,17 @@ export function FieldMode({
       {menuOpen && (
         <AccountMenu
           userName={userName}
-          settings={settingsQuery.data ?? null}
           changePassword={changePassword}
           onLogout={logout}
           onClose={() => setMenuOpen(false)}
+          onSwitchToDesktop={
+            onSwitchToDesktop
+              ? () => {
+                  setMenuOpen(false);
+                  onSwitchToDesktop();
+                }
+              : undefined
+          }
         />
       )}
     </>

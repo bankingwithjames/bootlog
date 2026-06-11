@@ -82,17 +82,19 @@ function authHeaders(base: Record<string, string> = {}): Record<string, string> 
 
 async function throwIfResNotOk(res: Response) {
   if (!res.ok) {
-    if (res.status === 401 && onUnauthorized) onUnauthorized();
+    if (res.status === 401) handleUnauthorized();
     const text = (await res.text()) || res.statusText;
     throw new Error(`${res.status}: ${text}`);
   }
 }
 
 // The published backend sandbox auto-pauses when idle and resumes on the next
-// request (a ~10-15s cold start). During that window the first request(s) can
-// fail with a network error or a 502/503/504 gateway response. We absorb that
-// transparently with a bounded retry-with-backoff so the user doesn't see a
-// spurious "failed" message before the backend warms up.
+// request (a ~10-15s cold start). During that window the proxy/backend can,
+// under the burst of concurrent requests a dashboard fires on load, return
+// transient failures: network errors, 502/503/504 gateways, AND spurious 401s
+// even for a perfectly valid token. We absorb all of these transparently with a
+// bounded retry-with-backoff so the user isn't bounced to the login screen mid
+// cold-start.
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function isColdStartStatus(status: number): boolean {
@@ -102,17 +104,24 @@ function isColdStartStatus(status: number): boolean {
 async function fetchWithRetry(
   input: string,
   init: RequestInit,
-  retries = 4,
+  opts: { retries?: number; retryAuth?: boolean } = {},
 ): Promise<Response> {
+  const retries = opts.retries ?? 4;
+  // When a token is attached, a 401 during the cold-start burst is very likely
+  // transient (the backend returns 200 for the same token before and after).
+  // Retrying lets it recover instead of triggering a false logout. A genuinely
+  // invalid/expired token keeps returning 401 through every retry and is then
+  // surfaced normally.
+  const retryAuth = opts.retryAuth ?? false;
   // Backoff schedule (ms) tuned to cover a typical cold-start window.
   const delays = [500, 1500, 3000, 5000];
   let lastErr: unknown;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       const res = await fetch(input, init);
-      // Retry transient gateway errors (cold start), but only if we have
-      // attempts left. A 401/400/etc. is a real answer — return immediately.
-      if (isColdStartStatus(res.status) && attempt < retries) {
+      const transient =
+        isColdStartStatus(res.status) || (retryAuth && res.status === 401);
+      if (transient && attempt < retries) {
         await sleep(delays[Math.min(attempt, delays.length - 1)]);
         continue;
       }
@@ -127,8 +136,39 @@ async function fetchWithRetry(
       throw lastErr;
     }
   }
-  // Exhausted retries on gateway errors — fall through with one final attempt.
+  // Exhausted retries — fall through with one final attempt.
   return fetch(input, init);
+}
+
+// Guarded logout-on-401. Because cold-start bursts can produce spurious 401s
+// for a valid token, we don't blindly log out on the first 401. Instead we
+// confirm the token is actually dead by re-validating against /api/auth/me
+// (which itself retries through cold-start). Only a confirmed 401 there clears
+// the session. The check is de-duplicated so a burst of 401s triggers a single
+// validation.
+let revalidating: Promise<void> | null = null;
+function handleUnauthorized(): void {
+  if (!authToken) return; // nothing to validate / already logged out
+  if (!onUnauthorized) return;
+  if (revalidating) return;
+  const tokenAtStart = authToken;
+  revalidating = (async () => {
+    try {
+      const res = await fetchWithRetry(`${API_BASE}/api/auth/me`, {
+        headers: authHeaders(),
+      });
+      if (res.status === 401) {
+        // Token is genuinely invalid/expired — only log out if it hasn't been
+        // replaced by a newer login in the meantime.
+        if (authToken === tokenAtStart && onUnauthorized) onUnauthorized();
+      }
+      // Any other status (200, transient 5xx after retries) → keep the session.
+    } catch {
+      // Network failure → treat as transient, keep the session.
+    } finally {
+      revalidating = null;
+    }
+  })();
 }
 
 export async function apiRequest(
@@ -136,11 +176,17 @@ export async function apiRequest(
   url: string,
   data?: unknown | undefined,
 ): Promise<Response> {
-  const res = await fetchWithRetry(`${API_BASE}${url}`, {
-    method,
-    headers: authHeaders(data ? { "Content-Type": "application/json" } : {}),
-    body: data ? JSON.stringify(data) : undefined,
-  });
+  // Retry auth (401) too when a token is present — absorbs spurious cold-start
+  // 401s on authenticated calls (e.g. login follow-ups, mutations).
+  const res = await fetchWithRetry(
+    `${API_BASE}${url}`,
+    {
+      method,
+      headers: authHeaders(data ? { "Content-Type": "application/json" } : {}),
+      body: data ? JSON.stringify(data) : undefined,
+    },
+    { retryAuth: authToken != null },
+  );
 
   await throwIfResNotOk(res);
   return res;
@@ -152,9 +198,14 @@ export const getQueryFn: <T>(options: {
 }) => QueryFunction<T> =
   ({ on401: unauthorizedBehavior }) =>
   async ({ queryKey }) => {
-    const res = await fetch(`${API_BASE}${queryKey.join("/")}`, {
-      headers: authHeaders(),
-    });
+    // Route dashboard queries through the same retry so the cold-start burst
+    // (transient 503/401 on a valid token) doesn't fail queries or trigger a
+    // false logout. retryAuth only kicks in when a token is attached.
+    const res = await fetchWithRetry(
+      `${API_BASE}${queryKey.join("/")}`,
+      { headers: authHeaders() },
+      { retryAuth: authToken != null },
+    );
 
     if (unauthorizedBehavior === "returnNull" && res.status === 401) {
       return null;

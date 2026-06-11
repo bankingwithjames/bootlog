@@ -66,23 +66,66 @@ export async function destroyUserSessions(userId: number): Promise<void> {
   await supabase.from("sessions").delete().eq("user_id", userId);
 }
 
+// Small helper: retry a Supabase query a few times on a TRANSIENT error
+// (network blip, connection reset, rate-limit) before giving up. The published
+// sandbox cold-start fires a burst of concurrent auth checks; without this a
+// single transient failure would surface as a spurious 401 for a VALID token,
+// bouncing the user back to the login screen on reload.
+async function withRetry<T>(
+  fn: () => Promise<{ data: T; error: any }>,
+  attempts = 4,
+): Promise<{ data: T; error: any }> {
+  const backoff = [150, 400, 900, 1500];
+  let last: { data: T; error: any } = { data: null as unknown as T, error: null };
+  for (let i = 0; i < attempts; i++) {
+    try {
+      last = await fn();
+      // No error -> success (this includes a legitimate empty result set).
+      if (!last.error) return last;
+    } catch (e) {
+      last = { data: null as unknown as T, error: e };
+    }
+    if (i < attempts - 1) {
+      await new Promise((r) => setTimeout(r, backoff[i] ?? 1500));
+    }
+  }
+  return last;
+}
+
+// Result of a token lookup. We MUST distinguish three cases so the auth
+// middleware never logs a user out on a transient backend hiccup:
+//   - { userId }            -> valid session
+//   - { userId: null }      -> token genuinely not found / expired (real 401)
+//   - { transientError }    -> backend unreachable; DO NOT treat as logged out
+export type TokenLookup =
+  | { userId: number; transientError?: false }
+  | { userId: null; transientError: boolean };
+
 export async function userIdForToken(
   token: string | undefined,
-): Promise<number | null> {
-  if (!token) return null;
-  const { data, error } = await supabase
-    .from("sessions")
-    .select("user_id, expires_at")
-    .eq("token", token)
-    .limit(1);
-  if (error || !data || data.length === 0) return null;
-  const s = data[0] as { user_id: number; expires_at: string };
-  // Expired: clean it up and treat as logged out.
+): Promise<TokenLookup> {
+  if (!token) return { userId: null, transientError: false };
+  const { data, error } = await withRetry(() =>
+    supabase
+      .from("sessions")
+      .select("user_id, expires_at")
+      .eq("token", token)
+      .limit(1),
+  );
+  // After retries the backend is still erroring: transient, not a real 401.
+  if (error) return { userId: null, transientError: true };
+  const rows = (data ?? []) as { user_id: number; expires_at: string }[];
+  if (rows.length === 0) return { userId: null, transientError: false };
+  const s = rows[0];
+  // Expired: clean it up and treat as a genuine logout.
   if (new Date(s.expires_at).getTime() < Date.now()) {
-    await supabase.from("sessions").delete().eq("token", token);
-    return null;
+    await supabase.from("sessions").delete().eq("token", token).then(
+      () => undefined,
+      () => undefined,
+    );
+    return { userId: null, transientError: false };
   }
-  return s.user_id;
+  return { userId: s.user_id };
 }
 
 function tokenFromRequest(req: Request): string | undefined {
@@ -101,6 +144,10 @@ declare global {
   namespace Express {
     interface Request {
       user?: User;
+      // Set when a token was present but the backend was transiently
+      // unreachable while validating it. Lets requireAuth answer 503
+      // (retryable) instead of 401 (which would log the user out).
+      authTransientError?: boolean;
     }
   }
 }
@@ -118,14 +165,24 @@ export async function attachUser(
   _res: Response,
   next: NextFunction,
 ): Promise<void> {
-  try {
-    const uid = await userIdForToken(tokenFromRequest(req));
-    if (uid != null) {
-      const user = await resolveUser(uid);
+  const token = tokenFromRequest(req);
+  if (!token) {
+    next();
+    return;
+  }
+  const lookup = await userIdForToken(token);
+  if (lookup.userId != null) {
+    try {
+      const user = await resolveUser(lookup.userId);
       if (user && user.active) req.user = user;
+    } catch {
+      // The session was valid but the user lookup hit a transient backend
+      // error. Don't log the user out over a hiccup — flag it as retryable.
+      req.authTransientError = true;
     }
-  } catch {
-    // Non-fatal: treat as unauthenticated if session lookup fails.
+  } else if (lookup.transientError) {
+    // Token present but backend unreachable -> retryable, not a real 401.
+    req.authTransientError = true;
   }
   next();
 }
@@ -137,6 +194,14 @@ export function requireAuth(
   next: NextFunction,
 ): void {
   if (!req.user) {
+    if (req.authTransientError) {
+      // Backend was transiently unreachable while validating a present token.
+      // Answer 503 so the client retries instead of logging out.
+      res
+        .status(503)
+        .json({ message: "Service temporarily unavailable, retrying" });
+      return;
+    }
     res.status(401).json({ message: "Sign in required" });
     return;
   }
@@ -147,6 +212,12 @@ export function requireAuth(
 export function requireRole(...roles: Role[]) {
   return (req: Request, res: Response, next: NextFunction): void => {
     if (!req.user) {
+      if (req.authTransientError) {
+        res
+          .status(503)
+          .json({ message: "Service temporarily unavailable, retrying" });
+        return;
+      }
       res.status(401).json({ message: "Sign in required" });
       return;
     }

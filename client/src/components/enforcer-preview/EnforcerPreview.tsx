@@ -18,6 +18,10 @@ import {
   ListChecks,
   Wifi,
   WifiOff,
+  Eye,
+  EyeOff,
+  Plus,
+  Car,
 } from "lucide-react";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
@@ -94,6 +98,17 @@ function todayKey(tzMin: number): string {
   return local.toISOString().slice(0, 10);
 }
 
+// Local (tz-shifted) YYYY-MM-DD for an ISO instant. Used to decide whether a
+// case belongs to "today" so History + the day KPIs only count today's work.
+function localDayKey(iso: string, tzMin: number): string {
+  try {
+    const local = new Date(parseISO(iso).getTime() - tzMin * 60000);
+    return local.toISOString().slice(0, 10);
+  } catch {
+    return "";
+  }
+}
+
 // ---- Required-evidence rule per the plan: a boot/active case must have at
 // least one photo before it can be marked released or paid. ----
 function caseHasEvidence(c: EnfCase): boolean {
@@ -146,6 +161,12 @@ export function EnforcerPreview() {
       ),
     [cases],
   );
+  // Resolved *today* only — History and the day KPIs count today's work, so a
+  // car resolved on a prior day drops off (its unresolved peers stay in Active).
+  const resolvedToday = useMemo(
+    () => resolvedCases.filter((c) => localDayKey(c.bootedAt, tzMin) === date),
+    [resolvedCases, tzMin, date],
+  );
   const conflicts = useMemo(
     () => activeCases.filter((c) => c.paidConflict),
     [activeCases],
@@ -196,6 +217,35 @@ export function EnforcerPreview() {
     },
   });
 
+  // ---- Place-a-boot mutation (the "+" FAB flow) ----
+  const createBoot = useMutation({
+    mutationFn: (vars: {
+      licensePlate: string;
+      makeModel: string;
+      color?: string | null;
+      bootFee: number;
+      bootedAt: string;
+    }) =>
+      apiRequest("POST", "/api/boots", vars).then((r) => r.json()),
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        queryKey: ["/api/preview/enforcer/cases"],
+      });
+      toast({
+        title: "Boot placed",
+        description: "The vehicle is now in your active enforcement queue.",
+      });
+      setView("queue");
+    },
+    onError: (err: any) => {
+      toast({
+        title: "Couldn't place boot",
+        description: err?.message ?? "Please try again.",
+        variant: "destructive",
+      });
+    },
+  });
+
   const userName = user?.name ?? "Enforcer";
   const lotName = "Electric Shuffle"; // single live lot; mirrors attendant mode
 
@@ -212,7 +262,7 @@ export function EnforcerPreview() {
           setView(v);
           if (v !== "case") setSelectedId(null);
         }}
-        onOpenScan={() => setView("lookup")}
+        onOpenScan={() => setView("addboot")}
         onOpenMenu={() => setMenuOpen(true)}
         onOpenNotifications={() => setView("queue")}
       >
@@ -221,7 +271,7 @@ export function EnforcerPreview() {
         {view === "home" && (
           <HomePage
             activeCases={activeCases}
-            resolvedToday={resolvedCases}
+            resolvedToday={resolvedToday}
             conflicts={conflicts}
             loading={casesQuery.isLoading}
             onOpenCase={openCase}
@@ -248,7 +298,15 @@ export function EnforcerPreview() {
         )}
 
         {view === "history" && (
-          <HistoryPage cases={resolvedCases} loading={casesQuery.isLoading} />
+          <HistoryPage cases={resolvedToday} loading={casesQuery.isLoading} />
+        )}
+
+        {view === "addboot" && (
+          <AddBootPage
+            onBack={() => setView("home")}
+            onSubmit={(vars) => createBoot.mutate(vars)}
+            submitting={createBoot.isPending}
+          />
         )}
 
         {view === "case" && selectedId != null && (
@@ -552,6 +610,8 @@ function HomePage({
   onGoQueue: () => void;
 }) {
   const collected = resolvedToday.reduce((s, c) => s + (c.amountCollected || 0), 0);
+  // Session-only privacy toggle for the collected-today amount (no storage).
+  const [showCollected, setShowCollected] = useState(true);
 
   // Filter-chip row — mirrors the attendant inventory filter chips. Filters the
   // "Active enforcement" list shown on Home.
@@ -587,12 +647,40 @@ function HomePage({
           valueColor={ENF.green}
           testid="kpi-resolved"
         />
-        <Kpi
-          label="Collected today"
-          value={currency(collected)}
-          valueColor={ENF.green}
-          testid="kpi-collected"
-        />
+        <div
+          className="relative rounded-[0.875rem] px-3.5 py-[13px]"
+          style={{ background: "#fff", border: `1px solid ${ENF.line}` }}
+          data-testid="kpi-collected"
+        >
+          <button
+            type="button"
+            onClick={() => setShowCollected((v) => !v)}
+            className="absolute right-2 top-2 flex h-7 w-7 items-center justify-center rounded-full"
+            style={{ color: ENF.ink3 }}
+            aria-label={showCollected ? "Hide collected amount" : "Show collected amount"}
+            aria-pressed={!showCollected}
+            data-testid="button-toggle-collected"
+          >
+            {showCollected ? (
+              <Eye className="h-[17px] w-[17px]" />
+            ) : (
+              <EyeOff className="h-[17px] w-[17px]" />
+            )}
+          </button>
+          <div
+            className="text-[25px] font-extrabold leading-none tracking-[-0.02em]"
+            style={{
+              fontFamily: ENF_MONO,
+              color: showCollected ? ENF.green : ENF.ink3,
+            }}
+            data-testid="kpi-collected-value"
+          >
+            {showCollected ? currency(collected) : "•••••"}
+          </div>
+          <div className="mt-1.5 text-[11.5px] font-semibold" style={{ color: ENF.ink2 }}>
+            Collected today
+          </div>
+        </div>
         <Kpi
           label="Needs review"
           value={String(conflicts.length)}
@@ -1475,6 +1563,181 @@ function PaymentPage({
         >
           <CheckCircle2 className="h-[18px] w-[18px]" />
           Confirm payment & resolve
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Place a Boot — opened from the "+" FAB. Captures the minimum fields needed to
+// register a new boot enforcement action (plate, vehicle, fee), then POSTs to
+// /api/boots. Photos/GPS are added later from the case detail, matching the
+// rest of the field flow.
+// ---------------------------------------------------------------------------
+function AddBootPage({
+  onBack,
+  onSubmit,
+  submitting,
+}: {
+  onBack: () => void;
+  onSubmit: (vars: {
+    licensePlate: string;
+    makeModel: string;
+    color?: string | null;
+    bootFee: number;
+    bootedAt: string;
+  }) => void;
+  submitting: boolean;
+}) {
+  const [plate, setPlate] = useState("");
+  const [makeModel, setMakeModel] = useState("");
+  const [color, setColor] = useState("");
+  const [fee, setFee] = useState("");
+
+  const feeNum = parseFloat(fee || "0") || 0;
+  const canSubmit =
+    plate.trim().length > 0 && makeModel.trim().length > 0 && !submitting;
+
+  function submit() {
+    if (!canSubmit) return;
+    onSubmit({
+      licensePlate: plate.trim().toUpperCase(),
+      makeModel: makeModel.trim(),
+      color: color.trim() || null,
+      bootFee: feeNum,
+      bootedAt: new Date().toISOString(),
+    });
+  }
+
+  const fieldWrap =
+    "mt-1.5 flex items-center gap-2 rounded-xl px-3.5 py-3";
+  const fieldStyle = { border: `1px solid ${ENF.line}` } as const;
+  const inputCls =
+    "flex-1 bg-transparent text-[16px] font-semibold outline-none";
+
+  return (
+    <div className="pb-8" data-testid="page-enforcer-addboot">
+      <div className="px-4 pt-3">
+        <button
+          type="button"
+          onClick={onBack}
+          className="flex items-center gap-1 text-[13px] font-bold"
+          style={{ color: ENF.accent }}
+          data-testid="button-addboot-back"
+        >
+          <ArrowLeft className="h-4 w-4" />
+          Cancel
+        </button>
+      </div>
+
+      <div className="px-4 pt-2">
+        <div className="flex items-center gap-2.5">
+          <div
+            className="flex h-10 w-10 items-center justify-center rounded-full"
+            style={{ background: ENF.orange }}
+          >
+            <Plus className="h-[22px] w-[22px] text-white" strokeWidth={2.6} />
+          </div>
+          <div>
+            <div className="text-[17px] font-extrabold" style={{ color: ENF.ink }}>
+              Place a boot
+            </div>
+            <div className="text-[12.5px] font-medium" style={{ color: ENF.ink2 }}>
+              Register a new enforcement action.
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="px-4 pt-4">
+        <div
+          className="rounded-[0.875rem] bg-white p-4"
+          style={{ border: `1px solid ${ENF.line}` }}
+        >
+          {/* License plate */}
+          <label className="text-[11px] font-semibold uppercase tracking-[0.04em]" style={{ color: ENF.ink3 }}>
+            License plate
+          </label>
+          <div className={fieldWrap} style={fieldStyle}>
+            <Tag className="h-[18px] w-[18px]" style={{ color: ENF.ink3 }} />
+            <input
+              value={plate}
+              onChange={(e) => setPlate(e.target.value.toUpperCase())}
+              placeholder="ABC 1234"
+              autoCapitalize="characters"
+              className={inputCls}
+              style={{ color: ENF.ink, letterSpacing: "0.06em" }}
+              data-testid="input-addboot-plate"
+            />
+          </div>
+
+          {/* Make & model */}
+          <label className="mt-3 block text-[11px] font-semibold uppercase tracking-[0.04em]" style={{ color: ENF.ink3 }}>
+            Make & model
+          </label>
+          <div className={fieldWrap} style={fieldStyle}>
+            <Car className="h-[18px] w-[18px]" style={{ color: ENF.ink3 }} />
+            <input
+              value={makeModel}
+              onChange={(e) => setMakeModel(e.target.value)}
+              placeholder="e.g. Honda Civic"
+              className={inputCls}
+              style={{ color: ENF.ink }}
+              data-testid="input-addboot-makemodel"
+            />
+          </div>
+
+          {/* Color (optional) */}
+          <label className="mt-3 block text-[11px] font-semibold uppercase tracking-[0.04em]" style={{ color: ENF.ink3 }}>
+            Color <span className="normal-case" style={{ color: ENF.ink3 }}>(optional)</span>
+          </label>
+          <div className={fieldWrap} style={fieldStyle}>
+            <input
+              value={color}
+              onChange={(e) => setColor(e.target.value)}
+              placeholder="e.g. Silver"
+              className={inputCls}
+              style={{ color: ENF.ink }}
+              data-testid="input-addboot-color"
+            />
+          </div>
+
+          {/* Boot fee */}
+          <label className="mt-3 block text-[11px] font-semibold uppercase tracking-[0.04em]" style={{ color: ENF.ink3 }}>
+            Boot fee
+          </label>
+          <div className={fieldWrap} style={fieldStyle}>
+            <span className="text-[16px] font-bold" style={{ color: ENF.ink3 }}>$</span>
+            <input
+              value={fee}
+              onChange={(e) => setFee(e.target.value.replace(/[^0-9.]/g, ""))}
+              inputMode="decimal"
+              placeholder="0.00"
+              className={inputCls}
+              style={{ color: ENF.ink }}
+              data-testid="input-addboot-fee"
+            />
+          </div>
+
+          <div className="mt-3 flex items-center gap-2 text-[12px] font-medium" style={{ color: ENF.ink3 }}>
+            <Camera className="h-4 w-4 shrink-0" />
+            Add evidence photos from the case after the boot is placed.
+          </div>
+        </div>
+      </div>
+
+      <div className="px-4 pt-4">
+        <button
+          type="button"
+          disabled={!canSubmit}
+          onClick={submit}
+          className="flex w-full items-center justify-center gap-2 rounded-[0.875rem] py-3.5 text-[15px] font-bold text-white disabled:opacity-50"
+          style={{ background: ENF.orange }}
+          data-testid="button-addboot-submit"
+        >
+          <Plus className="h-[18px] w-[18px]" strokeWidth={2.6} />
+          {submitting ? "Placing boot…" : "Place boot"}
         </button>
       </div>
     </div>

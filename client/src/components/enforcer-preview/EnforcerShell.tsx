@@ -7,7 +7,7 @@ import {
   Search as SearchIcon,
   ListChecks,
   Clock,
-  Camera,
+  Plus,
 } from "lucide-react";
 import logoMark from "@assets/logo-mark.png";
 import type { EnforcementStage } from "@shared/schema";
@@ -29,7 +29,8 @@ export type EnforcerView =
   | "profile"
   | "case"
   | "evidence"
-  | "payment";
+  | "payment"
+  | "addboot";
 
 // Field palette — reuses the attendant Signal Blue tokens for consistency, with
 // the plan's semantic status colors layered on top for stage badges.
@@ -295,7 +296,7 @@ export function EnforcerShell({
           onClick={() => onNavigate("lookup")}
           testid="tab-enforcer-lookup"
         />
-        {/* Center FAB — Scan plate */}
+        {/* Center FAB — "+" : initiate a boot enforcement (Place a Boot) */}
         <div className="flex flex-1 flex-col items-center">
           <button
             type="button"
@@ -307,16 +308,16 @@ export function EnforcerShell({
               boxShadow: "0 6px 16px rgba(232,86,10,.4)",
               border: "3px solid #fff",
             }}
-            aria-label="Scan plate"
-            data-testid="button-enforcer-scan"
+            aria-label="Place a boot"
+            data-testid="button-enforcer-addboot"
           >
-            <Camera className="h-[24px] w-[24px] text-white" strokeWidth={2.3} />
+            <Plus className="h-[26px] w-[26px] text-white" strokeWidth={2.6} />
           </button>
           <span
             className="mt-[3px] text-[10px] font-semibold"
             style={{ color: ENF.ink3 }}
           >
-            Scan
+            Boot
           </span>
         </div>
         <TabButton

@@ -390,10 +390,7 @@ function Logo() {
 export default function Home() {
   const { theme, toggle } = useTheme();
   const { toast } = useToast();
-  const { user, logout, can, isAttendant, isAdmin, isEnforcer } = useAuth();
-  // Build-time flag: only show the enforcer mobile preview entry point when enabled.
-  const enforcerPreviewEnabled =
-    import.meta.env.VITE_ENABLE_ENFORCER_MOBILE_PREVIEW === "1";
+  const { user, logout, can, isAttendant, isAdmin } = useAuth();
 
   // App settings (admin-controlled). historyVisibleDays = how many days BACK
   // staff may view within the 30-day window; admin always sees all 30.
@@ -1266,23 +1263,22 @@ export default function Home() {
               </div>
             )}
 
-            {/* Enforcer mobile dashboard preview — visible to enforcers/admins
-                when the build flag is on. One tap opens the new field UI; no
-                URL typing needed (the embedded app view has no address bar). */}
-            {enforcerPreviewEnabled && (isEnforcer || isAdmin) && (
+            {/* Mobile field-enforcer view. Enforcers now land on it by default;
+                admins keep this dashboard and can open the field UI on demand. */}
+            {isAdmin && (
               <Button
                 variant="ghost"
                 size="sm"
                 onClick={() => {
                   window.location.hash = "#/preview/enforcer-mobile";
                 }}
-                aria-label="Open enforcer mobile preview"
-                title="Open the new enforcer mobile dashboard (preview)"
+                aria-label="Open enforcer mobile view"
+                title="Open the mobile enforcer field dashboard"
                 className="h-9 gap-1.5 rounded-full border border-primary/40 bg-primary/10 px-3 text-xs font-semibold text-primary hover:bg-primary/20 hover:text-primary"
                 data-testid="button-enforcer-preview"
               >
                 <Smartphone className="h-4 w-4" />
-                <span className="hidden sm:inline">Preview</span>
+                <span className="hidden sm:inline">Field view</span>
               </Button>
             )}
 

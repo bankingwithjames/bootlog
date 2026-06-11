@@ -192,13 +192,6 @@ export function EnforcerShell({
               </div>
               <div className="flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-[0.05em] text-white/60">
                 Enforcer
-                <span
-                  className="rounded-full px-1.5 py-px text-[8.5px] font-bold tracking-[0.06em]"
-                  style={{ background: "rgba(232,86,10,.9)", color: "#fff" }}
-                  data-testid="enforcer-preview-tag"
-                >
-                  PREVIEW
-                </span>
               </div>
             </div>
           </div>

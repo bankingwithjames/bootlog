@@ -64,8 +64,29 @@ function AppRouter() {
   );
 }
 
+function RestoringSession() {
+  // Shown briefly while a persisted session is validated on load, so the login
+  // screen doesn't flash before the dashboard appears for an already-signed-in
+  // user.
+  return (
+    <div
+      className="min-h-screen flex items-center justify-center bg-background text-foreground"
+      data-testid="session-restoring"
+    >
+      <div
+        className="h-8 w-8 animate-spin rounded-full border-2 border-muted border-t-primary"
+        aria-label="Loading"
+        role="status"
+      />
+    </div>
+  );
+}
+
 function Gate() {
-  const { user } = useAuth();
+  const { user, loading } = useAuth();
+  // While restoring a persisted session, hold the loading state instead of
+  // briefly rendering the login screen.
+  if (loading) return <RestoringSession />;
   if (!user) return <Login />;
   // Force a password change before the app is usable (seeded admin default
   // password, or an account whose password an admin just reset).

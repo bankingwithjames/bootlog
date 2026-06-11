@@ -7,7 +7,13 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { queryClient, apiRequest, setAuthToken, setOnUnauthorized } from "@/lib/queryClient";
+import {
+  queryClient,
+  apiRequest,
+  getAuthToken,
+  setAuthToken,
+  setOnUnauthorized,
+} from "@/lib/queryClient";
 import type { Role, User } from "@shared/schema";
 
 type AuthState = {
@@ -46,10 +52,41 @@ const AuthContext = createContext<AuthState | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
-  // Token is in-memory only (iframe blocks storage), so there's no session to
-  // restore on mount. We start unauthenticated; loading is only true during a
-  // login round-trip.
-  const [loading, setLoading] = useState(false);
+  // When the app runs outside the iframe (published), the token is persisted in
+  // localStorage and seeded into queryClient on load. If a token exists we must
+  // validate it against the server before showing the app, so we start in a
+  // loading state and let the rehydrate effect resolve it. With no stored token
+  // there's nothing to restore, so loading starts false.
+  const [loading, setLoading] = useState<boolean>(() => getAuthToken() != null);
+
+  // On mount, if a persisted token exists, validate it via GET /api/auth/me to
+  // restore the session (this is what makes "keep me signed in" actually keep
+  // the user signed in across reloads). On any failure we clear the token and
+  // fall back to the login screen.
+  useEffect(() => {
+    let cancelled = false;
+    const token = getAuthToken();
+    if (!token) return;
+    (async () => {
+      try {
+        const res = await apiRequest("GET", "/api/auth/me");
+        const data = (await res.json()) as { user: User };
+        if (!cancelled) setUser(data.user);
+      } catch {
+        // Expired/invalid token, or backend unreachable after retries. Clear it
+        // and present the login screen.
+        if (!cancelled) {
+          setAuthToken(null);
+          setUser(null);
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const doLogout = useCallback(async () => {
     try {

@@ -14,7 +14,10 @@ import {
   CalendarCheck,
   Megaphone,
   Monitor,
+  Eye,
+  EyeOff,
 } from "lucide-react";
+import { useDiscretion, toggleDiscretion } from "@/lib/discretion";
 import type {
   BootRequest,
   ReleaseRequest,
@@ -41,6 +44,15 @@ function currency(n: number): string {
     style: "currency",
     currency: "USD",
   });
+}
+
+// Tailwind classes applied to a sensitive figure when discretion mode is ON.
+// The number stays in the layout (so spacing/size is identical) but is blurred
+// so a guest standing nearby can't read it; `select-none` stops accidental
+// text-selection from revealing it. Admin/enforcer UIs never call this.
+const DISCREET_CLASS = "blur-[6px] select-none";
+function discreetCls(on: boolean): string {
+  return on ? ` ${DISCREET_CLASS}` : "";
 }
 
 function timeAgo(iso: string | null | undefined): string {
@@ -571,6 +583,7 @@ export function AttendantWidget({
   const top = notifications.slice(0, 3);
   const owed = cash?.owedTotal ?? 0;
   const owedCount = cash?.owedCount ?? 0;
+  const discreet = useDiscretion();
 
   return (
     <section
@@ -586,9 +599,28 @@ export function AttendantWidget({
         <div className="flex items-center gap-2 text-[13.5px] font-bold">
           <Megaphone className="h-[18px] w-[18px]" /> Your dashboard
         </div>
-        <span className="text-[11px] font-semibold uppercase tracking-[0.06em] text-white/60">
-          Attendant
-        </span>
+        <div className="flex items-center gap-2.5">
+          {/* Discretion toggle — blurs the cash figures from nearby guests.
+              Visual only; does not change permissions or hide data. */}
+          <button
+            type="button"
+            onClick={toggleDiscretion}
+            aria-pressed={discreet}
+            title={discreet ? "Show cash figures" : "Hide cash figures from view"}
+            className="flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-bold transition-colors"
+            style={{
+              background: discreet ? "rgba(255,255,255,.95)" : "rgba(255,255,255,.16)",
+              color: discreet ? FIELD.header : "#fff",
+            }}
+            data-testid="button-discretion-toggle"
+          >
+            {discreet ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+            {discreet ? "Hidden" : "Hide"}
+          </button>
+          <span className="text-[11px] font-semibold uppercase tracking-[0.06em] text-white/60">
+            Attendant
+          </span>
+        </div>
       </div>
 
       {/* Cash-owed running total */}
@@ -604,7 +636,7 @@ export function AttendantWidget({
             Cash owed to bank
           </div>
           <div
-            className="text-[22px] font-extrabold leading-tight"
+            className={`text-[22px] font-extrabold leading-tight${discreetCls(discreet)}`}
             style={{ fontFamily: FIELD_MONO, color: FIELD.ink }}
             data-testid="widget-cash-owed"
           >
@@ -691,6 +723,7 @@ export function CashTracker({ cash }: { cash: CashSummary | undefined }) {
   const owed = cash?.owedTotal ?? 0;
   const reconciled = cash?.reconciledTotal ?? 0;
   const recent = (cash?.recent ?? []).filter((c) => !c.reconciled).slice(0, 5);
+  const discreet = useDiscretion();
 
   return (
     <section data-testid="field-cash-tracker">
@@ -706,7 +739,7 @@ export function CashTracker({ cash }: { cash: CashSummary | undefined }) {
             <div className="text-[11px] font-semibold uppercase tracking-[0.04em]" style={{ color: FIELD.ink3 }}>
               Owed (unverified)
             </div>
-            <div className="text-[18px] font-extrabold" style={{ fontFamily: FIELD_MONO, color: FIELD.orange }} data-testid="cash-owed-total">
+            <div className={`text-[18px] font-extrabold${discreetCls(discreet)}`} style={{ fontFamily: FIELD_MONO, color: FIELD.orange }} data-testid="cash-owed-total">
               {currency(owed)}
             </div>
           </div>
@@ -714,7 +747,7 @@ export function CashTracker({ cash }: { cash: CashSummary | undefined }) {
             <div className="text-[11px] font-semibold uppercase tracking-[0.04em]" style={{ color: FIELD.ink3 }}>
               Reconciled
             </div>
-            <div className="text-[18px] font-extrabold" style={{ fontFamily: FIELD_MONO, color: "#1f7a44" }} data-testid="cash-reconciled-total">
+            <div className={`text-[18px] font-extrabold${discreetCls(discreet)}`} style={{ fontFamily: FIELD_MONO, color: "#1f7a44" }} data-testid="cash-reconciled-total">
               {currency(reconciled)}
             </div>
           </div>

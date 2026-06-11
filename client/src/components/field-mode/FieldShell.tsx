@@ -87,11 +87,33 @@ export function FieldShell({
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-[9px]">
             <div
-              className="flex h-8 w-8 items-center justify-center rounded-[9px] text-base font-extrabold"
+              className="flex h-8 w-8 items-center justify-center rounded-[9px]"
               style={{ background: FIELD.orange }}
               data-testid="field-logo"
+              aria-label="BootLog"
             >
-              B
+              {/* BootLog mark — a wheel clamp ("boot") around a tire: the
+                  circular ring is the wheel, the angled bar + jaw is the clamp
+                  that locks it. Geometric, monochrome, legible at 32px. */}
+              <svg
+                viewBox="0 0 24 24"
+                className="h-[19px] w-[19px]"
+                fill="none"
+                stroke="#fff"
+                strokeWidth={2}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                {/* wheel / tire */}
+                <circle cx="11" cy="13" r="6" />
+                {/* hub */}
+                <circle cx="11" cy="13" r="1.4" fill="#fff" stroke="none" />
+                {/* clamp arm reaching up-right */}
+                <path d="M15.2 8.8 19 5" />
+                {/* clamp jaw / lock head */}
+                <rect x="17.5" y="3" width="4" height="4" rx="1" />
+              </svg>
             </div>
             <div className="leading-[1.15]">
               <div className="text-sm font-bold" data-testid="field-user-name">

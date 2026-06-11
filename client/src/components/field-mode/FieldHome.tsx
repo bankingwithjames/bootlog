@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { format, parseISO } from "date-fns";
 import { useQuery } from "@tanstack/react-query";
-import { Car, Lock, Search as SearchIcon, ChevronRight } from "lucide-react";
+import { Car, Search as SearchIcon, ChevronRight } from "lucide-react";
 import type { Boot, Location, Shift } from "@shared/schema";
 import { apiRequest } from "@/lib/queryClient";
 import {
@@ -217,10 +217,10 @@ export function FieldHome({
                 •••••
               </div>
               <div
-                className="mt-1.5 flex items-center gap-1 text-[10.5px] font-semibold"
+                className="mt-1.5 text-[11px] font-semibold"
                 style={{ color: FIELD.ink3 }}
               >
-                <Lock className="h-3 w-3" /> Hidden by admin
+                Collected today
               </div>
             </div>
           )}

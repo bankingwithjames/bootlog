@@ -1,4 +1,4 @@
-import "./load-env"; // MUST be first: loads .env.local (override) then .env before any env read
+import "dotenv/config"; // MUST be first: loads env (path overridable via DOTENV_CONFIG_PATH) before any env read
 import express, { Response, NextFunction } from "express";
 import type { Request, Express } from "express";
 import { registerRoutes } from "./routes";

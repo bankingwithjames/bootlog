@@ -4,7 +4,7 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "dev": "NODE_ENV=development tsx server/index.ts",
+    "dev": "NODE_ENV=development DOTENV_CONFIG_PATH=.env.local tsx server/index.ts",
     "build": "tsx script/build.ts",
     "build:client": "tsx script/build-client.ts",
     "build:vercel": "tsx script/build-vercel.ts",

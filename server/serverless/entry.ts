@@ -6,9 +6,7 @@
 // handler. The app instance is cached across warm invocations so route
 // registration + DB seeding only runs on a cold start.
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { createServerlessApp } from "../server/app";
-
-process.env.NODE_ENV = process.env.NODE_ENV || "production";
+import { createServerlessApp } from "../app";
 
 let appPromise: ReturnType<typeof createServerlessApp> | null = null;
 

@@ -1,5 +1,5 @@
 node_modules/
-dist/
+
 .vite/
 
 # SQLite database files — never commit; exposes demo data at rest
@@ -16,3 +16,9 @@ data.db-journal
 .DS_Store
 .vercel
 
+
+# Allow committed Vercel build artifacts
+!dist/
+!dist/server.cjs
+!dist/public/
+!dist/public/**

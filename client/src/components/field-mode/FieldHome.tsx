@@ -624,20 +624,22 @@ export function FieldMode({
     return locations.find((l) => l.id === id) ?? null;
   }, [myLocationIds, locations]);
 
-  // Scope boots to the assigned lot + today (local day). Boots with no
-  // locationId are excluded (can't attribute them to this lot).
+  // Scope boots to TODAY only (local day). The parking-location gate is
+  // intentionally OFF for now ("set parking location" isn't fully wired yet),
+  // so we no longer require an assigned lot or a matching boot.locationId —
+  // every boot from today shows up in the attendant's active list. Re-enable
+  // the lot scoping (assignedLot + b.locationId === assignedLot.id) once the
+  // set-parking-location flow is live.
   const todayStr = format(new Date(), "yyyy-MM-dd");
   const todayBoots = useMemo(() => {
     return boots.filter((b) => {
-      if (assignedLot == null) return false;
-      if (b.locationId !== assignedLot.id) return false;
       try {
         return format(parseISO(b.bootedAt), "yyyy-MM-dd") === todayStr;
       } catch {
         return false;
       }
     });
-  }, [boots, assignedLot, todayStr]);
+  }, [boots, todayStr]);
 
   // Paid plates today (already today-scoped by the caller's paid-cars query,
   // which is keyed to the current filter date).

@@ -764,7 +764,7 @@ export async function registerRoutes(
         {
           licensePlate: reqRow.licensePlate,
           makeModel: reqRow.makeModel,
-          color: null,
+          color: reqRow.color ?? null,
           bootedAt: new Date().toISOString(),
           bootFee: fee,
           photos: reqRow.photos,
@@ -1141,6 +1141,29 @@ export async function registerRoutes(
     res.status(201).json(snapshotToCar(row));
   });
 
+  // ---- Delete a MANUAL paid-car entry ----
+  // DELETE /api/paid-cars/manual/:sessionId
+  // Removing a paid-car record is destructive and admins-only. The storage
+  // layer additionally enforces source = 'manual', so a Stripe session id can
+  // never be deleted through this route even if one were supplied.
+  app.delete(
+    "/api/paid-cars/manual/:sessionId",
+    requireRole("admin"),
+    async (req, res) => {
+      const sessionId = String(req.params.sessionId || "");
+      if (!sessionId) {
+        return res.status(400).json({ message: "Invalid id" });
+      }
+      const result = await storage.deleteManualSnapshot(sessionId);
+      if (result.changes === 0) {
+        return res
+          .status(404)
+          .json({ message: "Manual paid entry not found" });
+      }
+      res.status(204).end();
+    },
+  );
+
   // ---- Cash collections: the current attendant's running cash total ----
   // GET /api/cash/mine -> { owedTotal, reconciledTotal, owedCount, recent[] }
   // The total of cash the signed-in attendant has logged (and still owes the
@@ -1439,6 +1462,75 @@ function registerEnforcerPreviewRoutes(app: Express) {
     },
   );
 
+  // GET /api/preview/enforcer/paid-cars-range?days=30&tz=<min>
+  // Flat list of every car paid (Stripe + manual) across the trailing window —
+  // powers the enforcer Lookup page so a plate can be matched against up to 30
+  // days of payment history (not just today). Past days serve their stored
+  // snapshot; today is fetched live. Staff are clamped to their visible window.
+  app.get(
+    "/api/preview/enforcer/paid-cars-range",
+    requireRole("enforcer", "admin"),
+    async (req, res) => {
+      const tz = Number(req.query.tz ?? 0) || 0;
+      const requested = Number(req.query.days ?? 30);
+      let dayCount =
+        Number.isFinite(requested) && requested > 0
+          ? Math.min(30, Math.floor(requested))
+          : 30;
+
+      // Clamp staff to their visible window (admins see the full 30 days).
+      const cutoff = await staffVisibleCutoffDay(req, tz);
+      if (cutoff) {
+        const { historyVisibleDays } = await storage.getSettings();
+        dayCount = Math.min(dayCount, historyVisibleDays + 1);
+      }
+
+      const today = todayKey(tz);
+      const [ty, tm, td] = today.split("-").map(Number);
+      const days: string[] = [];
+      for (let i = 0; i < dayCount; i++) {
+        const dt = new Date(Date.UTC(ty, tm - 1, td) - i * 86400000);
+        days.push(dt.toISOString().slice(0, 10));
+      }
+
+      // Aggregate per-day paid cars into one flat, de-duped list. Best-effort:
+      // a Stripe hiccup on any single day is tolerated (that day contributes
+      // whatever snapshot/manual rows it has) and flagged via stripeOk.
+      const cars: Array<{
+        id: string;
+        licensePlate: string;
+        makeModel: string;
+        color: string | null;
+        paidAt: string;
+        source: "stripe" | "manual";
+      }> = [];
+      const seen = new Set<string>();
+      let stripeOk = true;
+      for (const day of days) {
+        try {
+          const { cars: dayCars } = await resolvePaidCars(day, tz);
+          for (const c of dayCars) {
+            const key = c.id || `${normalizePlate(c.licensePlate)}_${c.paidAt}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            cars.push({
+              id: String(c.id),
+              licensePlate: c.licensePlate,
+              makeModel: c.makeModel,
+              color: c.color,
+              paidAt: c.paidAt,
+              source: c.source === "manual" ? "manual" : "stripe",
+            });
+          }
+        } catch {
+          stripeOk = false;
+        }
+      }
+      cars.sort((a, b) => (b.paidAt || "").localeCompare(a.paidAt || ""));
+      res.json({ cars, days: dayCount, stripeOk });
+    },
+  );
+
   // GET /api/preview/enforcer/case/:id — single case + append-only timeline.
   app.get(
     "/api/preview/enforcer/case/:id",
@@ -1592,6 +1684,267 @@ function registerEnforcerPreviewRoutes(app: Express) {
       const fresh = (await storage.getBoots()).find((b) => b.id === id) ?? updated;
       const events = await storage.getEnforcementEvents(id);
       res.json({ case: fresh, events });
+    },
+  );
+
+  // =========================================================================
+  // Admin Mobile Management Preview API (preview-only, admin-only, additive)
+  // =========================================================================
+  // A single aggregating call that powers the mobile admin dashboard: daily
+  // totals, live active-count trackers, this-month rollup, a 7-day trend, and
+  // the full recent-activity feed. Admin-only — gives complete visibility.
+  // GET /api/preview/admin/overview?tz=<offsetMinutes>
+  app.get(
+    "/api/preview/admin/overview",
+    requireRole("admin"),
+    async (req, res) => {
+      const tz = Number(req.query.tz ?? 0) || 0;
+      const today = todayKey(tz);
+
+      const [boots, users, locations, bootReqs, releaseReqs, cash] =
+        await Promise.all([
+          storage.getBoots(),
+          storage.getUsers(),
+          storage.getLocations(),
+          storage.getBootRequests(),
+          storage.getReleaseRequests(),
+          storage.getAllCashCollections(),
+        ]);
+
+      // Live paid plates for today (best-effort; tolerate Stripe hiccups).
+      let paidPlates = new Set<string>();
+      let paidTodayCount = 0; // total parked cars today (Stripe + manual)
+      let paidStripeCount = 0; // Stripe-only paid cars today
+      let paidCarsList: {
+        id: string;
+        licensePlate: string;
+        makeModel: string;
+        color: string | null;
+        paidAt: string;
+        source: "manual" | "stripe";
+        amount: number | null;
+        method: "cash" | "card" | "app" | null;
+        space: string | null;
+      }[] = [];
+      let stripeOk = true;
+      try {
+        const { cars } = await resolvePaidCars(today, tz);
+        paidTodayCount = cars.length;
+        paidStripeCount = cars.filter((c) => c.source === "stripe").length;
+        paidPlates = new Set(
+          cars.map((p) => normalizePlate(p.licensePlate)).filter(Boolean),
+        );
+        // Newest first, capped — powers the "Paid cars" list toggle.
+        paidCarsList = [...cars]
+          .sort((a, b) => (b.paidAt || "").localeCompare(a.paidAt || ""))
+          .slice(0, 40)
+          .map((c) => ({
+            id: c.id,
+            licensePlate: c.licensePlate,
+            makeModel: c.makeModel,
+            color: c.color ?? null,
+            paidAt: c.paidAt,
+            source: c.source,
+            amount: c.amount ?? null,
+            method: c.method ?? null,
+            space: c.space ?? null,
+          }));
+      } catch {
+        stripeOk = false;
+      }
+
+      const dayOf = (iso: string) => localDayKey(iso, tz);
+
+      // ---- Today's totals -------------------------------------------------
+      const todayBoots = boots.filter((b) => dayOf(b.bootedAt) === today);
+      const bootedToday = todayBoots.length;
+      const collectedToday = boots
+        .filter((b) => b.resolvedAt && dayOf(b.resolvedAt) === today)
+        .reduce((s, b) => s + (b.amountCollected ?? 0), 0);
+      const resolvedToday = boots.filter(
+        (b) =>
+          b.resolvedAt &&
+          dayOf(b.resolvedAt) === today &&
+          (b.status === "completed" ||
+            b.status === "settled" ||
+            b.status === "released"),
+      ).length;
+
+      // ---- Active-count trackers (live, not date-bound) -------------------
+      const activeBoots = boots.filter(
+        (b) => (b.status ?? "booted") === "booted",
+      );
+      const activeCount = activeBoots.length;
+      // Booted plates that appear paid for today = conflicts needing review.
+      const needsReview = activeBoots.filter((b) =>
+        paidPlates.has(normalizePlate(b.licensePlate)),
+      ).length;
+      const pendingRequests = bootReqs.filter(
+        (r) => r.status === "pending",
+      ).length;
+      const pendingReleases = releaseReqs.filter(
+        (r) => r.status === "pending",
+      ).length;
+
+      // ---- This-month rollup ---------------------------------------------
+      let monthCount = 0;
+      let monthCollected = 0;
+      const ym = today.slice(0, 7); // YYYY-MM in local tz
+      for (const b of boots) {
+        if (dayOf(b.bootedAt).slice(0, 7) === ym) monthCount += 1;
+      }
+      for (const b of boots) {
+        if (b.resolvedAt && dayOf(b.resolvedAt).slice(0, 7) === ym) {
+          monthCollected += b.amountCollected ?? 0;
+        }
+      }
+
+      // ---- Cash ledger (org-wide attendant cash reconciliation) ----------
+      // "Cash owed to bank" = unreconciled cash attendants are still holding
+      // (hasn't been physically deposited / handed to the admin yet).
+      // "Cash tracker" = the running ledger: owed vs already reconciled,
+      // plus per-collector breakdown and today's cash intake.
+      let cashOwedTotal = 0;
+      let cashOwedCount = 0;
+      let cashReconciledTotal = 0;
+      let cashCollectedToday = 0;
+      // All manual cash payments (verified + unverified) — drives the
+      // "Cash Payments Tracker" tile in the Today section.
+      let cashAllTotal = 0;
+      let cashAllCount = 0;
+      const byCollector = new Map<
+        number,
+        { id: number; name: string; owed: number; count: number }
+      >();
+      for (const c of cash) {
+        const amt = Number(c.amount) || 0;
+        cashAllTotal += amt;
+        cashAllCount += 1;
+        if (c.day === today || dayOf(c.collectedAt) === today) {
+          cashCollectedToday += amt;
+        }
+        if (c.reconciled) {
+          cashReconciledTotal += amt;
+        } else {
+          cashOwedTotal += amt;
+          cashOwedCount += 1;
+          const prev =
+            byCollector.get(c.collectedById) ?? {
+              id: c.collectedById,
+              name: c.collectedByName || "Attendant",
+              owed: 0,
+              count: 0,
+            };
+          prev.owed += amt;
+          prev.count += 1;
+          prev.name = c.collectedByName || prev.name;
+          byCollector.set(c.collectedById, prev);
+        }
+      }
+      const round2 = (n: number) => Math.round(n * 100) / 100;
+      const cashHolders = [...byCollector.values()]
+        .map((h) => ({ ...h, owed: round2(h.owed) }))
+        .sort((a, b) => b.owed - a.owed);
+      const recentCash = cash.slice(0, 12).map((c) => ({
+        id: c.id,
+        licensePlate: c.licensePlate,
+        amount: round2(Number(c.amount) || 0),
+        collectedByName: c.collectedByName || "Attendant",
+        collectedAt: c.collectedAt,
+        reconciled: c.reconciled,
+      }));
+
+      // ---- 7-day trend (oldest -> newest) --------------------------------
+      const trend: { day: string; booted: number; collected: number; isToday: boolean }[] = [];
+      for (let i = 6; i >= 0; i--) {
+        const d = dayMinus(today, i);
+        const booted = boots.filter((b) => dayOf(b.bootedAt) === d).length;
+        const collected = boots
+          .filter((b) => b.resolvedAt && dayOf(b.resolvedAt) === d)
+          .reduce((s, b) => s + (b.amountCollected ?? 0), 0);
+        trend.push({ day: d, booted, collected, isToday: d === today });
+      }
+
+      // ---- Recent activity feed (full data, newest first, capped) --------
+      const recent = [...boots]
+        .sort((a, b) => (b.bootedAt || "").localeCompare(a.bootedAt || ""))
+        .slice(0, 40)
+        .map((b) => {
+          const stage = deriveStage(b, paidPlates);
+          return {
+            id: b.id,
+            licensePlate: b.licensePlate,
+            makeModel: b.makeModel,
+            color: b.color,
+            bootedAt: b.bootedAt,
+            resolvedAt: b.resolvedAt,
+            bootFee: b.bootFee,
+            amountCollected: b.amountCollected,
+            status: b.status,
+            stage,
+            locationId: b.locationId,
+            paidConflict:
+              stage === "booted" &&
+              paidPlates.has(normalizePlate(b.licensePlate)),
+            lastActionByName: b.lastActionByName,
+          };
+        });
+
+      res.json({
+        date: today,
+        stripeOk,
+        today: {
+          booted: bootedToday,
+          collected: collectedToday,
+          resolved: resolvedToday,
+          // parkedTotal = total parked cars today (Stripe + manual)
+          parkedTotal: paidTodayCount,
+          // paidStripe = Stripe-only paid cars today
+          paidStripe: paidStripeCount,
+          // cashPaymentsTotal = all manual cash payments (verified + unverified)
+          cashPaymentsTotal: round2(cashAllTotal),
+          cashPaymentsCount: cashAllCount,
+        },
+        active: {
+          boots: activeCount,
+          needsReview,
+          pendingRequests,
+          pendingReleases,
+        },
+        cash: {
+          owedToBank: round2(cashOwedTotal),
+          owedCount: cashOwedCount,
+          reconciledTotal: round2(cashReconciledTotal),
+          collectedToday: round2(cashCollectedToday),
+          allTotal: round2(cashAllTotal),
+          allCount: cashAllCount,
+          holders: cashHolders,
+          recent: recentCash,
+        },
+        month: {
+          label: ym,
+          booted: monthCount,
+          collected: monthCollected,
+        },
+        trend,
+        recent,
+        paidCars: paidCarsList,
+        staff: {
+          total: users.length,
+          active: users.filter((u) => u.active).length,
+          enforcers: users.filter((u) => u.role === "enforcer").length,
+          attendants: users.filter((u) => u.role === "attendant").length,
+        },
+        locations: {
+          total: locations.length,
+          active: locations.filter((l) => l.active).length,
+          list: locations.map((l) => ({
+            id: l.id,
+            name: l.name,
+            active: l.active,
+          })),
+        },
+      });
     },
   );
 }

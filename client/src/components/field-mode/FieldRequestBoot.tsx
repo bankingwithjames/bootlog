@@ -64,6 +64,8 @@ export function FieldRequestBoot({
 
   // Form fields
   const [plate, setPlate] = useState("");
+  const [makeModel, setMakeModel] = useState("");
+  const [color, setColor] = useState("");
   const [reason, setReason] = useState("");
   const [fee, setFee] = useState(""); // optional suggested fee (dollars)
   // Photo evidence — data-URLs (hard-required: at least one before Review).
@@ -84,9 +86,11 @@ export function FieldRequestBoot({
   }, []);
 
   const plateOk = plate.trim().length > 0;
+  const makeModelOk = makeModel.trim().length > 0;
   const photoOk = photos.length > 0;
-  // Step 1 → Step 2 requires a plate AND at least one photo (hard-required).
-  const canReview = plateOk && photoOk;
+  // Step 1 → Step 2 requires a plate, a make/model AND at least one photo so the
+  // enforcer can identify the vehicle quickly (all hard-required).
+  const canReview = plateOk && makeModelOk && photoOk;
 
   function handleFiles(files: FileList | null) {
     if (!files || files.length === 0) return;
@@ -107,13 +111,13 @@ export function FieldRequestBoot({
     mutationFn: async () => {
       const body: Record<string, unknown> = {
         licensePlate: plate.trim(),
-        // No structured make/model on this flow; the schema requires a
-        // make/model string, so we send a clear placeholder the enforcer can
-        // confirm/override when they place the boot.
-        makeModel: "Unknown — confirm on placement",
+        // Attendant-stated make/model so the enforcer can identify the vehicle
+        // quickly when they place the boot.
+        makeModel: makeModel.trim(),
         note: reason.trim(),
         photos,
       };
+      if (color.trim()) body.color = color.trim();
       const f = Number(fee);
       if (fee.trim() && Number.isFinite(f) && f >= 0) body.suggestedFee = f;
       const res = await apiRequest("POST", "/api/boot-requests", body);
@@ -142,7 +146,9 @@ export function FieldRequestBoot({
   // server/sms.ts). Shown verbatim in the Step 2 preview so the attendant sees
   // precisely what gets dispatched.
   const smsBody =
-    `Boot REQUEST: ${plate.trim() || "—"} (Unknown — confirm on placement) flagged by you` +
+    `Boot REQUEST: ${plate.trim() || "—"} (${
+      makeModel.trim() || "make/model pending"
+    }${color.trim() ? `, ${color.trim()}` : ""}) flagged by you` +
     (assignedLot ? ` at ${assignedLot.name}.` : ".");
 
   return (
@@ -232,6 +238,38 @@ export function FieldRequestBoot({
                 <ScanLine className="h-[15px] w-[15px]" /> Tap to scan plate with
                 camera
               </div>
+            </Field>
+
+            {/* Make & model — REQUIRED so the enforcer can identify the car */}
+            <Field label="Make & model" required>
+              <input
+                value={makeModel}
+                onChange={(e) => setMakeModel(e.target.value)}
+                placeholder="e.g. Honda Civic"
+                className="w-full rounded-[0.875rem] px-[13px] py-3 text-[15px] font-semibold outline-none placeholder:font-normal placeholder:text-[#94a1ad]"
+                style={{
+                  background: FIELD.fieldBg,
+                  border: `1px solid ${FIELD.line}`,
+                  color: FIELD.ink,
+                }}
+                data-testid="input-request-makemodel"
+              />
+            </Field>
+
+            {/* Color — optional */}
+            <Field label="Color (optional)">
+              <input
+                value={color}
+                onChange={(e) => setColor(e.target.value)}
+                placeholder="e.g. Silver"
+                className="w-full rounded-[0.875rem] px-[13px] py-3 text-[15px] font-semibold outline-none placeholder:font-normal placeholder:text-[#94a1ad]"
+                style={{
+                  background: FIELD.fieldBg,
+                  border: `1px solid ${FIELD.line}`,
+                  color: FIELD.ink,
+                }}
+                data-testid="input-request-color"
+              />
             </Field>
 
             {/* Photo evidence — REQUIRED */}
@@ -428,6 +466,13 @@ export function FieldRequestBoot({
               data-testid="review-checklist"
             >
               <CheckRow label="License plate" value={plate.trim() || "—"} mono />
+              <CheckRow
+                label="Make & model"
+                value={makeModel.trim() || "—"}
+              />
+              {color.trim() && (
+                <CheckRow label="Color" value={color.trim()} />
+              )}
               <CheckRow
                 label="Photo evidence"
                 value={`${photos.length} photo${photos.length === 1 ? "" : "s"}`}

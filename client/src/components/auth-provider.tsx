@@ -44,6 +44,7 @@ type AuthState = {
     enforcement: boolean; // complete/settle/release/re-open
     workRequests: boolean; // initiate/dismiss boot requests
     deleteBoot: boolean; // remove a boot entry
+    deletePaidManual: boolean; // remove a MANUAL paid-car entry (admin only)
     logPaidCar: boolean; // add a paid car
     manageUsers: boolean; // user administration
   };
@@ -192,6 +193,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         enforcement: isAdmin || isEnforcer,
         workRequests: isAdmin || isEnforcer,
         deleteBoot: isAdmin,
+        deletePaidManual: isAdmin, // only admins may delete manual paid entries
         logPaidCar: isAdmin || isEnforcer || isAttendant, // logging a paid vehicle is part of the attendant's field workflow
         manageUsers: isAdmin,
       },

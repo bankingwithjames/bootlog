@@ -981,6 +981,30 @@ export default function Home() {
     },
   });
 
+  // Delete a MANUAL paid-car entry (admin only). Keyed on the snapshot
+  // sessionId (the PaidCar `id`). Stripe rows are never deletable — the button
+  // is only rendered for source === "manual" and the server enforces it too.
+  const deletePaidMutation = useMutation({
+    mutationFn: async (sessionId: string) => {
+      await apiRequest(
+        "DELETE",
+        `/api/paid-cars/manual/${encodeURIComponent(sessionId)}`,
+      );
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/paid-cars"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/history"] });
+      toast({ title: "Removed", description: "Manual paid entry deleted." });
+    },
+    onError: (err: Error) => {
+      toast({
+        title: "Could not delete entry",
+        description: err.message,
+        variant: "destructive",
+      });
+    },
+  });
+
   // Manual paid-car entry: form + mutation. Adds a paid car to the selected
   // day, merged with Stripe data and persisted into the 30-day snapshot.
   const [showManual, setShowManual] = useState(false);
@@ -1279,6 +1303,26 @@ export default function Home() {
               >
                 <Smartphone className="h-4 w-4" />
                 <span className="hidden sm:inline">Field view</span>
+              </Button>
+            )}
+
+            {/* Mobile admin management dashboard (preview). Admin-only entry
+                point — combines daily totals, active trackers, and the cash
+                tracker / cash-owed-to-bank widgets in one scrollable view. */}
+            {isAdmin && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  window.location.hash = "#/preview/admin-mobile";
+                }}
+                aria-label="Open admin mobile management view"
+                title="Open the mobile management dashboard"
+                className="h-9 gap-1.5 rounded-full border border-primary/40 bg-primary/10 px-3 text-xs font-semibold text-primary hover:bg-primary/20 hover:text-primary"
+                data-testid="button-admin-preview"
+              >
+                <LayoutDashboard className="h-4 w-4" />
+                <span className="hidden sm:inline">Management view</span>
               </Button>
             )}
 
@@ -2173,6 +2217,19 @@ export default function Home() {
                                 <span className="ml-auto whitespace-nowrap">
                                   {format(parseISO(c.paidAt), "h:mm a")}
                                 </span>
+                                {can.deletePaidManual && c.source === "manual" && (
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-9 w-9 shrink-0 text-muted-foreground hover:text-destructive"
+                                    disabled={deletePaidMutation.isPending}
+                                    onClick={() => deletePaidMutation.mutate(c.id)}
+                                    data-testid={`button-delete-paid-${c.id}`}
+                                    aria-label="Delete manual paid entry"
+                                  >
+                                    <Trash2 className="h-4 w-4" />
+                                  </Button>
+                                )}
                               </div>
                             </div>
                           );
@@ -2190,6 +2247,7 @@ export default function Home() {
                               <TableHead>Color</TableHead>
                               <TableHead>Source</TableHead>
                               <TableHead className="whitespace-nowrap">Time</TableHead>
+                              {can.deletePaidManual && <TableHead className="w-10" />}
                             </TableRow>
                           </TableHeader>
                           <TableBody>
@@ -2226,6 +2284,23 @@ export default function Home() {
                                 <TableCell className="whitespace-nowrap text-muted-foreground">
                                   {format(parseISO(c.paidAt), "h:mm a")}
                                 </TableCell>
+                                {can.deletePaidManual && (
+                                  <TableCell className="w-10 text-right">
+                                    {c.source === "manual" && (
+                                      <Button
+                                        variant="ghost"
+                                        size="icon"
+                                        className="h-9 w-9 text-muted-foreground hover:text-destructive"
+                                        disabled={deletePaidMutation.isPending}
+                                        onClick={() => deletePaidMutation.mutate(c.id)}
+                                        data-testid={`button-delete-paid-desktop-${c.id}`}
+                                        aria-label="Delete manual paid entry"
+                                      >
+                                        <Trash2 className="h-4 w-4" />
+                                      </Button>
+                                    )}
+                                  </TableCell>
+                                )}
                               </TableRow>
                             ))}
                           </TableBody>
@@ -3105,6 +3180,21 @@ function HistoryView({
     locationFilter !== "all" && locationFilter !== "none"
       ? locations.find((l) => String(l.id) === locationFilter)
       : undefined;
+  // Quick-search by date label (e.g. "Mon", "Mar 4"). Filters the day rows.
+  const [histSearch, setHistSearch] = useState("");
+  const histNeedle = histSearch.trim().toLowerCase();
+  const visibleDays = useMemo(
+    () =>
+      days.filter(
+        (d) =>
+          !histNeedle ||
+          format(parseISO(d.day + "T00:00:00"), "EEE, MMM d")
+            .toLowerCase()
+            .includes(histNeedle) ||
+          d.day.toLowerCase().includes(histNeedle),
+      ),
+    [days, histNeedle],
+  );
   const totals = days.reduce(
     (acc, d) => {
       acc.boots += d.bootCount;
@@ -3203,6 +3293,13 @@ function HistoryView({
             Showing boots with no assigned location
           </div>
         )}
+        {/* Quick-search across the day rows by date. */}
+        <PlateSearch
+          value={histSearch}
+          onChange={setHistSearch}
+          placeholder="Search by date (e.g. Mar 4)…"
+          testid="input-search-history"
+        />
       </CardHeader>
       <CardContent>
         {loading ? (
@@ -3210,9 +3307,16 @@ function HistoryView({
         ) : (
           <div>
             {/* Mobile: stacked cards — every metric visible, no horizontal scroll */}
-            {isMobileView && (
+            {isMobileView && visibleDays.length === 0 ? (
+              <EmptyState
+                icon={<Search className="h-8 w-8 text-muted-foreground/50" />}
+                title={`No days match “${histSearch}”`}
+                subtitle="Try a different date or clear the search."
+              />
+            ) : null}
+            {isMobileView && visibleDays.length > 0 && (
             <div className="max-h-[60vh] space-y-3 overflow-auto">
-              {days.map((d) => (
+              {visibleDays.map((d) => (
                 <button
                   key={d.day}
                   type="button"
@@ -3297,7 +3401,17 @@ function HistoryView({
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {days.map((d) => (
+                {visibleDays.length === 0 && (
+                  <TableRow>
+                    <TableCell
+                      colSpan={6}
+                      className="py-8 text-center text-sm text-muted-foreground"
+                    >
+                      No days match “{histSearch}”.
+                    </TableCell>
+                  </TableRow>
+                )}
+                {visibleDays.map((d) => (
                   <TableRow
                     key={d.day}
                     className="cursor-pointer"
@@ -3445,6 +3559,7 @@ function RequestsView({
     defaultValues: {
       licensePlate: "",
       makeModel: "",
+      color: "",
       suggestedFee: 0,
       note: "",
       photos: [],
@@ -3463,8 +3578,17 @@ function RequestsView({
       ),
     [requests],
   );
-  const pending = sorted.filter((r) => r.status === "pending");
-  const resolved = sorted.filter((r) => r.status !== "pending");
+  // Quick-search across requests by plate / make-model / color.
+  const [reqSearch, setReqSearch] = useState("");
+  const reqNeedle = reqSearch.trim().toLowerCase();
+  const matchReq = (r: BootRequest) =>
+    !reqNeedle ||
+    r.licensePlate.toLowerCase().includes(reqNeedle) ||
+    (r.makeModel ?? "").toLowerCase().includes(reqNeedle) ||
+    (r.color ?? "").toLowerCase().includes(reqNeedle);
+  const filtered = sorted.filter(matchReq);
+  const pending = filtered.filter((r) => r.status === "pending");
+  const resolved = filtered.filter((r) => r.status !== "pending");
 
   return (
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-[360px_1fr]">
@@ -3489,6 +3613,7 @@ function RequestsView({
                   form.reset({
                     licensePlate: "",
                     makeModel: "",
+                    color: "",
                     suggestedFee: 0,
                     note: "",
                     photos: [],
@@ -3527,6 +3652,30 @@ function RequestsView({
                           autoComplete="off"
                           data-testid="input-request-makemodel"
                           {...field}
+                        />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name="color"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>
+                        Color{" "}
+                        <span className="font-normal text-muted-foreground">
+                          (optional)
+                        </span>
+                      </FormLabel>
+                      <FormControl>
+                        <Input
+                          placeholder="Silver"
+                          autoComplete="off"
+                          data-testid="input-request-color"
+                          {...field}
+                          value={field.value ?? ""}
                         />
                       </FormControl>
                       <FormMessage />
@@ -3640,18 +3789,26 @@ function RequestsView({
               ? "Initiate creates an active boot; dismiss closes the request."
               : "Track the boot requests you've submitted."}
           </CardDescription>
+          <PlateSearch
+            value={reqSearch}
+            onChange={setReqSearch}
+            placeholder="Search by plate or make/model…"
+            testid="input-search-requests"
+          />
         </CardHeader>
         <CardContent className="space-y-6">
           {loading ? (
             <TableSkeleton />
-          ) : sorted.length === 0 ? (
+          ) : filtered.length === 0 ? (
             <EmptyState
               icon={<Inbox className="h-8 w-8 text-muted-foreground/50" />}
-              title="No boot requests"
+              title={reqNeedle ? `No requests match “${reqSearch}”` : "No boot requests"}
               subtitle={
-                canRequest
-                  ? "Submit a request using the form. New requests appear here once sent."
-                  : "New boot requests from attendants will appear here."
+                reqNeedle
+                  ? "Try a different plate or make/model."
+                  : canRequest
+                    ? "Submit a request using the form. New requests appear here once sent."
+                    : "New boot requests from attendants will appear here."
               }
             />
           ) : (

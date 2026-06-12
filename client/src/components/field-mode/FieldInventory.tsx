@@ -393,7 +393,11 @@ export function FieldInventory({
             />
           ) : (
             <div className="flex flex-col gap-4" data-testid="inventory-list">
-              <Group title={`Paid vehicles · ${displayPaidCars.length}`}>
+              <Group
+                title={`Paid vehicles · ${displayPaidCars.length}`}
+                scroll
+                testid="scroll-paid-inventory"
+              >
                 {displayPaidCars.map((c) => (
                   <PaidCarRow key={c.id} car={c} />
                 ))}
@@ -438,7 +442,11 @@ export function FieldInventory({
             {/* Paid vehicles from the API — shown in the "All" view so the list
                 of paid (Stripe/manual) cars is always visible alongside boots. */}
             {chip === "all" && displayPaidCars.length > 0 && (
-              <Group title={`Paid vehicles · ${displayPaidCars.length}`}>
+              <Group
+                title={`Paid vehicles · ${displayPaidCars.length}`}
+                scroll
+                testid="scroll-paid-inventory-all"
+              >
                 {displayPaidCars.map((c) => (
                   <PaidCarRow key={c.id} car={c} />
                 ))}
@@ -464,7 +472,17 @@ export function FieldInventory({
   );
 }
 
-function Group({ title, children }: { title: string; children: React.ReactNode }) {
+function Group({
+  title,
+  children,
+  scroll = false,
+  testid,
+}: {
+  title: string;
+  children: React.ReactNode;
+  scroll?: boolean;
+  testid?: string;
+}) {
   return (
     <section>
       <h3
@@ -474,8 +492,15 @@ function Group({ title, children }: { title: string; children: React.ReactNode }
         {title}
       </h3>
       <div
-        className="overflow-hidden rounded-[0.875rem]"
-        style={{ background: "#fff", border: `1px solid ${FIELD.line}` }}
+        className={`rounded-[0.875rem] ${scroll ? "overflow-y-auto overscroll-contain" : "overflow-hidden"}`}
+        style={{
+          background: "#fff",
+          border: `1px solid ${FIELD.line}`,
+          ...(scroll
+            ? { maxHeight: "22rem", WebkitOverflowScrolling: "touch" as const }
+            : {}),
+        }}
+        data-testid={testid}
       >
         {children}
       </div>

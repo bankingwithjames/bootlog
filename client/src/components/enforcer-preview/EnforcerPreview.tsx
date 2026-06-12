@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { format, parseISO } from "date-fns";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import {
@@ -22,6 +22,7 @@ import {
   EyeOff,
   Plus,
   Car,
+  LogOut,
 } from "lucide-react";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
@@ -30,6 +31,7 @@ import type {
   EnforcementStage,
   EnforcementEvent,
   EvidenceLabel,
+  BootRequest,
 } from "@shared/schema";
 import { ENFORCEMENT_STAGE_META } from "@shared/schema";
 import {
@@ -67,6 +69,18 @@ type EnfCase = {
 };
 
 type CasesResponse = { date: string; cases: EnfCase[]; stripeOk: boolean };
+
+// A car paid today (Stripe + manual), mirroring /api/paid-cars. Surfaced in the
+// History tab as "Active paid cars today" so the enforcer can see the day's
+// payments regardless of boot/lot state.
+type PaidCarLite = {
+  id: string;
+  licensePlate: string;
+  makeModel: string;
+  color: string | null;
+  paidAt: string;
+  source?: "stripe" | "manual";
+};
 type CaseDetailResponse = {
   case: EnfCase;
   events: EnforcementEvent[];
@@ -116,7 +130,7 @@ function caseHasEvidence(c: EnfCase): boolean {
 }
 
 export function EnforcerPreview() {
-  const { user } = useAuth();
+  const { user, logout } = useAuth();
   const { toast } = useToast();
   const tzMin = new Date().getTimezoneOffset();
   const date = todayKey(tzMin);
@@ -142,6 +156,70 @@ export function EnforcerPreview() {
 
   const cases = casesQuery.data?.cases ?? [];
   const stripeOk = casesQuery.data?.stripeOk ?? true;
+
+  // ---- Cars paid TODAY (Stripe + manual) for the History tab. Independent of
+  // boot/lot state, so it shows the day's payments even when no boot exists. ----
+  const paidCarsQuery = useQuery<{ cars: PaidCarLite[]; source: string }>({
+    queryKey: ["/api/paid-cars", date, tzMin],
+    queryFn: () =>
+      apiRequest("GET", `/api/paid-cars?date=${date}&tz=${tzMin}`).then((r) =>
+        r.json(),
+      ),
+    refetchInterval: 30000,
+    staleTime: 0,
+  });
+  const paidCarsToday = useMemo<PaidCarLite[]>(
+    () =>
+      [...(paidCarsQuery.data?.cars ?? [])].sort((a, b) => {
+        const ta = a.paidAt ? new Date(a.paidAt).getTime() : 0;
+        const tb = b.paidAt ? new Date(b.paidAt).getTime() : 0;
+        return tb - ta;
+      }),
+    [paidCarsQuery.data],
+  );
+
+  // ---- Paid cars across the trailing 30 days (Stripe + manual). Powers the
+  // Lookup page so a plate can be matched against a month of payment history,
+  // not just today. Independent of any boot/lot state. ----
+  const paidCarsRangeQuery = useQuery<{
+    cars: PaidCarLite[];
+    days: number;
+    stripeOk: boolean;
+  }>({
+    queryKey: ["/api/preview/enforcer/paid-cars-range", tzMin],
+    queryFn: () =>
+      apiRequest(
+        "GET",
+        `/api/preview/enforcer/paid-cars-range?days=30&tz=${tzMin}`,
+      ).then((r) => r.json()),
+    refetchInterval: 60000,
+    staleTime: 0,
+  });
+  const paidCars30d = useMemo<PaidCarLite[]>(
+    () => paidCarsRangeQuery.data?.cars ?? [],
+    [paidCarsRangeQuery.data],
+  );
+
+  // ---- Pending boot requests (from admin/attendant) awaiting an enforcer to
+  // initiate or dismiss. This is what links a requested boot to chop1's queue. ----
+  const bootRequestsQuery = useQuery<BootRequest[]>({
+    queryKey: ["/api/boot-requests"],
+    queryFn: () =>
+      apiRequest("GET", "/api/boot-requests").then((r) => r.json()),
+    refetchInterval: 30000,
+    staleTime: 0,
+  });
+  const pendingRequests = useMemo<BootRequest[]>(
+    () =>
+      [...(bootRequestsQuery.data ?? [])]
+        .filter((r) => r.status === "pending")
+        .sort(
+          (a, b) =>
+            new Date(b.requestedAt).getTime() -
+            new Date(a.requestedAt).getTime(),
+        ),
+    [bootRequestsQuery.data],
+  );
 
   // Active = anything not yet resolved (booted family). Resolved = paid/released/
   // completed. Used to split Home + Queue + History.
@@ -225,6 +303,7 @@ export function EnforcerPreview() {
       color?: string | null;
       bootFee: number;
       bootedAt: string;
+      photos?: string[];
     }) =>
       apiRequest("POST", "/api/boots", vars).then((r) => r.json()),
     onSuccess: () => {
@@ -246,6 +325,42 @@ export function EnforcerPreview() {
     },
   });
 
+  // ---- Resolve a pending boot request: initiate (creates a real boot, carrying
+  // make/model + color) or dismiss. Mirrors the admin Requests flow; the route
+  // allows enforcer + admin roles. ----
+  const resolveRequest = useMutation({
+    mutationFn: (vars: {
+      id: number;
+      action: "initiate" | "dismiss";
+      bootFee?: number;
+    }) =>
+      apiRequest("PATCH", `/api/boot-requests/${vars.id}`, {
+        action: vars.action,
+        bootFee: vars.bootFee,
+      }).then((r) => r.json()),
+    onSuccess: (_data, vars) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/boot-requests"] });
+      queryClient.invalidateQueries({
+        queryKey: ["/api/preview/enforcer/cases"],
+      });
+      toast({
+        title:
+          vars.action === "initiate" ? "Boot initiated" : "Request dismissed",
+        description:
+          vars.action === "initiate"
+            ? "The vehicle is now an active boot in your queue."
+            : "The request was closed without booting.",
+      });
+    },
+    onError: (err: any) => {
+      toast({
+        title: "Couldn't resolve request",
+        description: err?.message ?? "Please try again.",
+        variant: "destructive",
+      });
+    },
+  });
+
   const userName = user?.name ?? "Enforcer";
   const lotName = "Electric Shuffle"; // single live lot; mirrors attendant mode
 
@@ -256,7 +371,7 @@ export function EnforcerPreview() {
         lotName={lotName}
         shiftLabel={`${activeCases.length} active`}
         onShift={activeCases.length > 0}
-        hasUnread={conflicts.length > 0}
+        hasUnread={conflicts.length > 0 || pendingRequests.length > 0}
         active={view}
         onNavigate={(v) => {
           setView(v);
@@ -271,9 +386,13 @@ export function EnforcerPreview() {
         {view === "home" && (
           <HomePage
             activeCases={activeCases}
+            resolvedCases={resolvedCases}
             resolvedToday={resolvedToday}
             conflicts={conflicts}
+            pendingRequests={pendingRequests}
+            paidCars30d={paidCars30d}
             loading={casesQuery.isLoading}
+            paidLoading={paidCarsRangeQuery.isLoading}
             onOpenCase={openCase}
             onGoLookup={() => setView("lookup")}
             onGoQueue={() => setView("queue")}
@@ -284,7 +403,9 @@ export function EnforcerPreview() {
           <LookupPage
             query={query}
             setQuery={setQuery}
-            cases={cases}
+            resolvedCases={resolvedCases}
+            paidCars30d={paidCars30d}
+            loading={casesQuery.isLoading || paidCarsRangeQuery.isLoading}
             onOpenCase={openCase}
           />
         )}
@@ -292,13 +413,31 @@ export function EnforcerPreview() {
         {view === "queue" && (
           <QueuePage
             activeCases={activeCases}
+            pendingRequests={pendingRequests}
+            requestsLoading={bootRequestsQuery.isLoading}
             loading={casesQuery.isLoading}
             onOpenCase={openCase}
+            onInitiate={(r) =>
+              resolveRequest.mutate({
+                id: r.id,
+                action: "initiate",
+                bootFee: (r.suggestedFee ?? 0) > 0 ? r.suggestedFee : undefined,
+              })
+            }
+            onDismiss={(r) =>
+              resolveRequest.mutate({ id: r.id, action: "dismiss" })
+            }
+            resolving={resolveRequest.isPending}
           />
         )}
 
         {view === "history" && (
-          <HistoryPage cases={resolvedToday} loading={casesQuery.isLoading} />
+          <HistoryPage
+            cases={resolvedToday}
+            paidCarsToday={paidCarsToday}
+            loading={casesQuery.isLoading}
+            paidLoading={paidCarsQuery.isLoading}
+          />
         )}
 
         {view === "addboot" && (
@@ -368,11 +507,22 @@ export function EnforcerPreview() {
             setMenuOpen(false);
             setView("profile");
           }}
+          onLogout={() => {
+            setMenuOpen(false);
+            void logout();
+          }}
         />
       )}
 
       {view === "profile" && (
-        <ProfileSheet userName={userName} lotName={lotName} onBack={() => setView("home")} />
+        <ProfileSheet
+          userName={userName}
+          lotName={lotName}
+          onBack={() => setView("home")}
+          onLogout={() => {
+            void logout();
+          }}
+        />
       )}
     </>
   );
@@ -589,22 +739,135 @@ function CardSkeleton() {
   );
 }
 
+// CaseScrollList — CaseCard rows inside a fixed-height scroll container. Used by
+// the Home filter tabs (Booted / Released) so long lists never push the page.
+function CaseScrollList({
+  cases,
+  onOpenCase,
+  testid,
+}: {
+  cases: EnfCase[];
+  onOpenCase: (id: number) => void;
+  testid: string;
+}) {
+  return (
+    <div className="px-4">
+      <div
+        className="overflow-y-auto rounded-[0.875rem]"
+        style={{
+          maxHeight: "22rem",
+          background: "#fff",
+          border: `1px solid ${ENF.line}`,
+          WebkitOverflowScrolling: "touch",
+        }}
+        data-testid={testid}
+      >
+        {cases.map((c, i) => (
+          <CaseCard
+            key={c.id}
+            c={c}
+            onOpen={onOpenCase}
+            last={i === cases.length - 1}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// PendingRequestQuickList — a lightweight, read-only quick-glance list of boot
+// requests awaiting an enforcer. Used by the Home "Awaiting" tab. Each row taps
+// through to the full enforcement queue where the request can be initiated.
+function PendingRequestQuickList({
+  requests,
+  onGoQueue,
+  testid,
+}: {
+  requests: BootRequest[];
+  onGoQueue: () => void;
+  testid: string;
+}) {
+  return (
+    <div className="px-4">
+      <div
+        className="overflow-y-auto rounded-[0.875rem] p-2.5"
+        style={{
+          maxHeight: "22rem",
+          background: ENF.fieldBg ?? "#f4f7fa",
+          border: `1px solid ${ENF.line}`,
+          WebkitOverflowScrolling: "touch",
+        }}
+        data-testid={testid}
+      >
+        <div className="space-y-2.5" data-testid={`${testid}-list`}>
+          {requests.map((r) => (
+            <button
+              key={r.id}
+              type="button"
+              onClick={onGoQueue}
+              className="flex w-full items-center gap-3 rounded-2xl bg-white p-3 text-left"
+              style={{ border: `1px solid ${ENF.line}` }}
+              data-testid={`row-awaiting-${r.id}`}
+            >
+              <span
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
+                style={{ background: ENF.amberSoft, color: ENF.amber }}
+              >
+                <Clock3 className="h-[18px] w-[18px]" />
+              </span>
+              <span className="min-w-0 flex-1">
+                <PlateText plate={r.licensePlate} size={16} />
+                <span
+                  className="mt-0.5 block truncate text-[12px]"
+                  style={{ color: ENF.ink2 }}
+                >
+                  {[r.makeModel, r.color].filter(Boolean).join(" \u00b7 ") ||
+                    "\u2014"}
+                </span>
+                <span
+                  className="mt-0.5 block truncate text-[11px]"
+                  style={{ color: ENF.ink3 }}
+                >
+                  {format(parseISO(r.requestedAt), "MMM d, h:mm a")}
+                  {r.requestedByName ? ` \u00b7 by ${r.requestedByName}` : ""}
+                </span>
+              </span>
+              <ChevronRight
+                className="h-5 w-5 shrink-0"
+                style={{ color: ENF.ink3 }}
+              />
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Page 1 — Home
 // ---------------------------------------------------------------------------
 function HomePage({
   activeCases,
+  resolvedCases,
   resolvedToday,
   conflicts,
+  pendingRequests,
+  paidCars30d,
   loading,
+  paidLoading,
   onOpenCase,
   onGoLookup,
   onGoQueue,
 }: {
   activeCases: EnfCase[];
+  resolvedCases: EnfCase[];
   resolvedToday: EnfCase[];
   conflicts: EnfCase[];
+  pendingRequests: BootRequest[];
+  paidCars30d: PaidCarLite[];
   loading: boolean;
+  paidLoading: boolean;
   onOpenCase: (id: number) => void;
   onGoLookup: () => void;
   onGoQueue: () => void;
@@ -613,20 +876,19 @@ function HomePage({
   // Session-only privacy toggle for the collected-today amount (no storage).
   const [showCollected, setShowCollected] = useState(true);
 
-  // Filter-chip row — mirrors the attendant inventory filter chips. Filters the
-  // "Active enforcement" list shown on Home.
+  // Filter-chip row — mirrors the attendant inventory filter chips. Each chip
+  // selects a different data source for the "Active enforcement" panel:
+  //   all      → active boots (everything currently enforced)
+  //   booted   → active boots in a booted/reopened state
+  //   awaiting → pending boot requests waiting on the enforcer
+  //   released → released vehicles (from resolved history)
+  //   paid     → paid vehicles (Stripe + manual, trailing 30 days)
   type HomeFilter = "all" | "booted" | "awaiting" | "released" | "paid";
   const [filter, setFilter] = useState<HomeFilter>("all");
-  const filtered = activeCases.filter((c) => {
-    if (filter === "all") return true;
-    if (filter === "booted")
-      return ["booted", "reopened", "pending_enforcement"].includes(c.stage);
-    if (filter === "awaiting")
-      return ["payment_pending", "review_needed"].includes(c.stage);
-    if (filter === "released") return c.stage === "released";
-    if (filter === "paid") return ["paid", "completed"].includes(c.stage);
-    return true;
-  });
+  const activeBooted = activeCases.filter((c) =>
+    ["booted", "reopened", "pending_enforcement"].includes(c.stage),
+  );
+  const releasedCases = resolvedCases.filter((c) => c.stage === "released");
   const chips: { key: HomeFilter; label: string }[] = [
     { key: "all", label: "All" },
     { key: "booted", label: "Booted" },
@@ -720,6 +982,46 @@ function HomePage({
         </button>
       </div>
 
+      {/* Pending boot requests banner — links admin/attendant requests to the
+          enforcer. Tapping jumps to the queue where they can be initiated. */}
+      {pendingRequests.length > 0 && (
+        <div className="px-4 pt-4">
+          <button
+            type="button"
+            onClick={onGoQueue}
+            className="flex w-full items-center gap-3 rounded-[0.875rem] px-3.5 py-3 text-left"
+            style={{
+              background: ENF.amberSoft,
+              border: `1px solid ${ENF.amber}33`,
+            }}
+            data-testid="banner-pending-requests"
+          >
+            <span
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
+              style={{ background: "#fff", color: ENF.amber }}
+            >
+              <Clock3 className="h-[18px] w-[18px]" />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span
+                className="block text-[13px] font-bold"
+                style={{ color: ENF.ink }}
+              >
+                {pendingRequests.length} boot request
+                {pendingRequests.length === 1 ? "" : "s"} waiting
+              </span>
+              <span
+                className="block text-[11.5px] font-medium"
+                style={{ color: ENF.ink2 }}
+              >
+                Tap to review and initiate
+              </span>
+            </span>
+            <ChevronRight className="h-5 w-5 shrink-0" style={{ color: ENF.amber }} />
+          </button>
+        </div>
+      )}
+
       {conflicts.length > 0 && (
         <>
           <SectionTitle>Needs review</SectionTitle>
@@ -745,24 +1047,73 @@ function HomePage({
         ))}
       </div>
 
-      {loading ? (
-        <CardSkeleton />
-      ) : filtered.length === 0 ? (
-        <EmptyState
-          icon={<ShieldCheck className="h-7 w-7" />}
-          title={filter === "all" ? "No active boots" : "Nothing in this filter"}
-          sub={
-            filter === "all"
-              ? "When you place a boot or one needs attention, it'll show up here."
-              : "Try a different filter to see other cases."
-          }
-        />
+      {filter === "awaiting" ? (
+        loading ? (
+          <CardSkeleton />
+        ) : pendingRequests.length === 0 ? (
+          <EmptyState
+            icon={<Clock3 className="h-7 w-7" />}
+            title="No requests awaiting"
+            sub="Boot requests from attendants and admins will appear here, ready to initiate."
+          />
+        ) : (
+          <PendingRequestQuickList
+            requests={pendingRequests}
+            onGoQueue={onGoQueue}
+            testid="list-awaiting-requests"
+          />
+        )
+      ) : filter === "released" ? (
+        loading ? (
+          <CardSkeleton />
+        ) : releasedCases.length === 0 ? (
+          <EmptyState
+            icon={<ShieldCheck className="h-7 w-7" />}
+            title="No released vehicles"
+            sub="Vehicles you release after payment or resolution will be listed here."
+          />
+        ) : (
+          <CaseScrollList
+            cases={releasedCases}
+            onOpenCase={onOpenCase}
+            testid="list-released-vehicles"
+          />
+        )
+      ) : filter === "paid" ? (
+        paidLoading ? (
+          <CardSkeleton />
+        ) : paidCars30d.length === 0 ? (
+          <EmptyState
+            icon={<CheckCircle2 className="h-7 w-7" />}
+            title="No paid vehicles"
+            sub="Paid vehicles (Stripe and manual) from the last 30 days will be listed here."
+          />
+        ) : (
+          <div className="px-4">
+            <PaidCarScrollList cars={paidCars30d} testid="list-paid-vehicles" />
+          </div>
+        )
       ) : (
-        <CaseList
-          cases={filtered.slice(0, 8)}
-          onOpenCase={onOpenCase}
-          testid="list-active-enforcement"
-        />
+        // "all" and "booted" — active enforcement cases
+        (() => {
+          const cases = filter === "booted" ? activeBooted : activeCases;
+          if (loading) return <CardSkeleton />;
+          if (cases.length === 0)
+            return (
+              <EmptyState
+                icon={<ShieldCheck className="h-7 w-7" />}
+                title={filter === "booted" ? "No booted vehicles" : "No active boots"}
+                sub="When you place a boot or one needs attention, it'll show up here."
+              />
+            );
+          return (
+            <CaseScrollList
+              cases={cases}
+              onOpenCase={onOpenCase}
+              testid="list-active-enforcement"
+            />
+          );
+        })()
       )}
     </div>
   );
@@ -857,22 +1208,35 @@ function Chip({
 function LookupPage({
   query,
   setQuery,
-  cases,
+  resolvedCases,
+  paidCars30d,
+  loading,
   onOpenCase,
 }: {
   query: string;
   setQuery: (v: string) => void;
-  cases: EnfCase[];
+  resolvedCases: EnfCase[];
+  paidCars30d: PaidCarLite[];
+  loading: boolean;
   onOpenCase: (id: number) => void;
 }) {
   const norm = (s: string) => s.toUpperCase().replace(/[^A-Z0-9]/g, "");
   const q = norm(query);
-  const matches = q
-    ? cases.filter(
-        (c) => norm(c.licensePlate).includes(q) || c.makeModel.toUpperCase().includes(query.toUpperCase()),
-      )
+
+  // Plate-only search across 30 days of resolved cases + paid cars (Stripe +
+  // manual). No day filter — the search bar is the only control. We match on the
+  // normalized plate so spacing/dashes don't matter.
+  const caseMatches = q
+    ? resolvedCases.filter((c) => norm(c.licensePlate).includes(q))
     : [];
-  const exact = q ? cases.find((c) => norm(c.licensePlate) === q) : undefined;
+  const paidMatches = q
+    ? paidCars30d.filter((c) => norm(c.licensePlate).includes(q))
+    : [];
+  // An exact resolved-case match still gets the verification banner up top.
+  const exact = q
+    ? resolvedCases.find((c) => norm(c.licensePlate) === q)
+    : undefined;
+  const hasResults = caseMatches.length > 0 || paidMatches.length > 0;
 
   return (
     <div className="pb-6" data-testid="page-enforcer-lookup">
@@ -907,6 +1271,16 @@ function LookupPage({
             </button>
           )}
         </div>
+        {!query && (
+          <div
+            className="mt-2 px-1 text-[11.5px] font-medium"
+            style={{ color: ENF.ink3 }}
+            data-testid="lookup-scope-hint"
+          >
+            Searches the last 30 days of resolved cases &amp; paid cars (Stripe +
+            manual).
+          </div>
+        )}
       </div>
 
       {/* Verification result for an exact match */}
@@ -920,11 +1294,13 @@ function LookupPage({
         <EmptyState
           icon={<SearchIcon className="h-7 w-7" />}
           title="Look up a vehicle"
-          sub="Type a plate to check its payment + enforcement status before you act."
+          sub="Type a plate to check 30 days of resolved cases and paid history before you act."
         />
       )}
 
-      {query && matches.length === 0 && (
+      {query && loading && <CardSkeleton />}
+
+      {query && !loading && !hasResults && (
         <div className="px-4">
           <div
             className="rounded-[0.875rem] bg-white px-4 py-5 text-center"
@@ -932,22 +1308,121 @@ function LookupPage({
             data-testid="lookup-no-match"
           >
             <div className="text-[15px] font-bold" style={{ color: ENF.ink }}>
-              No active case for that plate
+              No match in the last 30 days
             </div>
             <div className="mt-1 text-[13px]" style={{ color: ENF.ink2 }}>
-              No boot or open case found for{" "}
-              <span style={{ fontFamily: ENF_MONO }}>{query.toUpperCase()}</span> today.
+              No resolved case or paid record found for{" "}
+              <span style={{ fontFamily: ENF_MONO }}>{query.toUpperCase()}</span>.
             </div>
           </div>
         </div>
       )}
 
-      {query && matches.length > 0 && (
+      {query && !loading && caseMatches.length > 0 && (
         <>
-          <SectionTitle>Matches</SectionTitle>
-          <CaseList cases={matches} onOpenCase={onOpenCase} testid="list-lookup-matches" />
+          <SectionTitle>
+            Resolved cases ({caseMatches.length})
+          </SectionTitle>
+          {/* Scroll container: keeps a long match list from pushing the page. */}
+          <div className="px-4">
+            <div
+              className="overflow-y-auto rounded-[0.875rem]"
+              style={{
+                maxHeight: "20rem",
+                background: "#fff",
+                border: `1px solid ${ENF.line}`,
+                WebkitOverflowScrolling: "touch",
+              }}
+              data-testid="scroll-lookup-cases"
+            >
+              <div data-testid="list-lookup-matches">
+                {caseMatches.map((c, i) => (
+                  <CaseCard
+                    key={c.id}
+                    c={c}
+                    onOpen={onOpenCase}
+                    last={i === caseMatches.length - 1}
+                  />
+                ))}
+              </div>
+            </div>
+          </div>
         </>
       )}
+
+      {query && !loading && paidMatches.length > 0 && (
+        <>
+          <SectionTitle>Paid records ({paidMatches.length})</SectionTitle>
+          <div className="px-4">
+            <PaidCarScrollList cars={paidMatches} testid="scroll-lookup-paid" />
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// PaidCarScrollList — a fixed-height scrolling list of paid-car cards (Stripe +
+// manual), reused by Lookup and the Home "Paid" tab. Mirrors the History page
+// paid-car card treatment so payment records read identically everywhere.
+function PaidCarScrollList({
+  cars,
+  testid,
+}: {
+  cars: PaidCarLite[];
+  testid: string;
+}) {
+  return (
+    <div
+      className="overflow-y-auto rounded-2xl p-2.5"
+      style={{
+        maxHeight: "22rem",
+        background: ENF.fieldBg ?? "#f4f7fa",
+        border: `1px solid ${ENF.line}`,
+        WebkitOverflowScrolling: "touch",
+      }}
+      data-testid={testid}
+    >
+      <div className="space-y-2.5" data-testid={`${testid}-list`}>
+        {cars.map((c) => (
+          <div
+            key={c.id}
+            className="rounded-2xl border bg-white p-3.5"
+            style={{ borderColor: ENF.line }}
+            data-testid={`card-paid-${c.id}`}
+          >
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <PlateText plate={c.licensePlate} size={17} />
+                <div
+                  className="mt-0.5 truncate text-[12.5px]"
+                  style={{ color: ENF.ink2 }}
+                >
+                  {[c.makeModel, c.color].filter(Boolean).join(" \u00b7 ") ||
+                    "\u2014"}
+                </div>
+              </div>
+              <span
+                className="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide"
+                style={
+                  c.source === "manual"
+                    ? { background: ENF.greenSoft, color: ENF.green }
+                    : { background: ENF.accentSoft, color: ENF.accent }
+                }
+                data-testid={`paid-source-${c.id}`}
+              >
+                {c.source === "manual" ? "Manual" : "Stripe"}
+              </span>
+            </div>
+            <div
+              className="mt-2.5 flex items-center justify-between border-t pt-2.5 text-[11.5px]"
+              style={{ borderColor: ENF.line, color: ENF.ink3 }}
+            >
+              <span className="truncate">{dateTimeLabel(c.paidAt)}</span>
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -1003,28 +1478,242 @@ function VerificationCard({ c, onOpen }: { c: EnfCase; onOpen: (id: number) => v
 // ---------------------------------------------------------------------------
 // Page 3 — Enforcement Queue
 // ---------------------------------------------------------------------------
-function QueuePage({
-  activeCases,
-  loading,
-  onOpenCase,
+// PendingRequestCard — a boot request submitted by an admin or attendant that is
+// waiting for the enforcer to initiate (place a real boot) or dismiss it.
+function PendingRequestCard({
+  request,
+  onInitiate,
+  onDismiss,
+  resolving,
 }: {
-  activeCases: EnfCase[];
-  loading: boolean;
-  onOpenCase: (id: number) => void;
+  request: BootRequest;
+  onInitiate: (r: BootRequest) => void;
+  onDismiss: (r: BootRequest) => void;
+  resolving: boolean;
 }) {
   return (
+    <div
+      className="rounded-[0.875rem] bg-white p-3.5"
+      style={{ border: `1px solid ${ENF.line}` }}
+      data-testid={`card-request-${request.id}`}
+    >
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <PlateText
+            plate={request.licensePlate}
+            size={19}
+            testid={`text-request-plate-${request.id}`}
+          />
+          <div
+            className="mt-1 text-[13px] font-semibold"
+            style={{ color: ENF.ink }}
+            data-testid={`text-request-makemodel-${request.id}`}
+          >
+            {request.makeModel}
+            {request.color ? (
+              <span style={{ color: ENF.ink2 }}> · {request.color}</span>
+            ) : null}
+          </div>
+        </div>
+        <span
+          className="shrink-0 rounded-full px-2 py-0.5 text-[10.5px] font-bold uppercase tracking-[0.04em]"
+          style={{ background: ENF.amberSoft, color: ENF.amber }}
+        >
+          Requested
+        </span>
+      </div>
+
+      <div
+        className="mt-2 flex items-center gap-1 text-[11.5px]"
+        style={{ color: ENF.ink2 }}
+      >
+        <Clock3 className="h-3.5 w-3.5" />
+        {format(parseISO(request.requestedAt), "MMM d, h:mm a")}
+        {request.requestedByName ? (
+          <span data-testid={`text-request-by-${request.id}`}>
+            {" "}· by {request.requestedByName}
+          </span>
+        ) : null}
+      </div>
+
+      {(request.suggestedFee ?? 0) > 0 && (
+        <div className="mt-1 text-[11.5px]" style={{ color: ENF.ink2 }}>
+          Suggested fee:{" "}
+          <span className="font-semibold" style={{ fontFamily: ENF_MONO }}>
+            {currency(request.suggestedFee)}
+          </span>
+        </div>
+      )}
+      {request.note ? (
+        <div
+          className="mt-1.5 text-[12px]"
+          style={{ color: ENF.ink2 }}
+          data-testid={`text-request-note-${request.id}`}
+        >
+          “{request.note}”
+        </div>
+      ) : null}
+
+      <div className="mt-3 flex gap-2">
+        <button
+          type="button"
+          disabled={resolving}
+          onClick={() => onInitiate(request)}
+          className="flex h-11 flex-1 items-center justify-center gap-1.5 rounded-[0.75rem] text-[13px] font-bold text-white disabled:opacity-60"
+          style={{ background: ENF.orange }}
+          data-testid={`button-initiate-${request.id}`}
+        >
+          <Wrench className="h-4 w-4" />
+          Initiate boot
+        </button>
+        <button
+          type="button"
+          disabled={resolving}
+          onClick={() => onDismiss(request)}
+          className="flex h-11 items-center justify-center gap-1.5 rounded-[0.75rem] px-4 text-[13px] font-bold disabled:opacity-60"
+          style={{
+            background: "#fff",
+            color: ENF.ink2,
+            border: `1px solid ${ENF.line}`,
+          }}
+          data-testid={`button-dismiss-${request.id}`}
+        >
+          <X className="h-4 w-4" />
+          Dismiss
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function QueuePage({
+  activeCases,
+  pendingRequests,
+  requestsLoading,
+  loading,
+  onOpenCase,
+  onInitiate,
+  onDismiss,
+  resolving,
+}: {
+  activeCases: EnfCase[];
+  pendingRequests: BootRequest[];
+  requestsLoading: boolean;
+  loading: boolean;
+  onOpenCase: (id: number) => void;
+  onInitiate: (r: BootRequest) => void;
+  onDismiss: (r: BootRequest) => void;
+  resolving: boolean;
+}) {
+  // Plain-text search across plate + make/model for both pending requests and
+  // active enforcement cases.
+  const [q, setQ] = useState("");
+  const needle = q.trim().toLowerCase();
+  const matchReq = (r: BootRequest) =>
+    !needle ||
+    r.licensePlate.toLowerCase().includes(needle) ||
+    r.makeModel.toLowerCase().includes(needle) ||
+    (r.color ?? "").toLowerCase().includes(needle);
+  const matchCase = (c: EnfCase) =>
+    !needle ||
+    c.licensePlate.toLowerCase().includes(needle) ||
+    (c.makeModel ?? "").toLowerCase().includes(needle) ||
+    (c.color ?? "").toLowerCase().includes(needle);
+  const filteredRequests = pendingRequests.filter(matchReq);
+  const filteredCases = activeCases.filter(matchCase);
+
+  return (
     <div className="pb-6" data-testid="page-enforcer-queue">
-      <SectionTitle>Enforcement queue · {activeCases.length}</SectionTitle>
-      {loading ? (
+      {/* Search bar — filters both pending requests and active cases. */}
+      <div className="px-4 pt-4">
+        <QueueSearch value={q} onChange={setQ} testid="input-queue-search" />
+      </div>
+
+      {/* Pending requests from admin/attendant awaiting an enforcer decision. */}
+      <SectionTitle>Pending requests · {filteredRequests.length}</SectionTitle>
+      {requestsLoading ? (
         <CardSkeleton />
-      ) : activeCases.length === 0 ? (
+      ) : filteredRequests.length === 0 ? (
         <EmptyState
-          icon={<ListChecksIcon />}
-          title="Queue is clear"
-          sub="No active boots or pending actions right now."
+          icon={<Clock3 className="h-7 w-7" />}
+          title={needle ? "No matching requests" : "No pending requests"}
+          sub={
+            needle
+              ? "Try a different plate or make/model."
+              : "Boot requests from staff and admin will appear here for you to initiate."
+          }
         />
       ) : (
-        <CaseList cases={activeCases} onOpenCase={onOpenCase} testid="list-queue" />
+        <div className="space-y-2.5 px-4">
+          {filteredRequests.map((r) => (
+            <PendingRequestCard
+              key={r.id}
+              request={r}
+              onInitiate={onInitiate}
+              onDismiss={onDismiss}
+              resolving={resolving}
+            />
+          ))}
+        </div>
+      )}
+
+      <SectionTitle>Enforcement queue · {filteredCases.length}</SectionTitle>
+      {loading ? (
+        <CardSkeleton />
+      ) : filteredCases.length === 0 ? (
+        <EmptyState
+          icon={<ListChecksIcon />}
+          title={needle ? "No matching cases" : "Queue is clear"}
+          sub={
+            needle
+              ? "Try a different plate or make/model."
+              : "No active boots or pending actions right now."
+          }
+        />
+      ) : (
+        <CaseList cases={filteredCases} onOpenCase={onOpenCase} testid="list-queue" />
+      )}
+    </div>
+  );
+}
+
+// QueueSearch — ENF-styled plain-text search input reused on the queue page.
+function QueueSearch({
+  value,
+  onChange,
+  testid,
+  placeholder = "Search plate or make/model",
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  testid?: string;
+  placeholder?: string;
+}) {
+  return (
+    <div
+      className="flex items-center gap-2 rounded-[0.75rem] bg-white px-3"
+      style={{ border: `1px solid ${ENF.line}`, height: 44 }}
+    >
+      <SearchIcon className="h-[18px] w-[18px]" style={{ color: ENF.ink3 }} />
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        className="min-w-0 flex-1 bg-transparent text-[14px] outline-none"
+        style={{ color: ENF.ink }}
+        data-testid={testid}
+      />
+      {value && (
+        <button
+          type="button"
+          onClick={() => onChange("")}
+          className="flex h-6 w-6 items-center justify-center rounded-full"
+          style={{ color: ENF.ink3 }}
+          aria-label="Clear search"
+          data-testid={testid ? `${testid}-clear` : undefined}
+        >
+          <X className="h-4 w-4" />
+        </button>
       )}
     </div>
   );
@@ -1587,17 +2276,38 @@ function AddBootPage({
     color?: string | null;
     bootFee: number;
     bootedAt: string;
+    photos?: string[];
   }) => void;
   submitting: boolean;
 }) {
+  const MAX_PHOTOS = 5;
   const [plate, setPlate] = useState("");
   const [makeModel, setMakeModel] = useState("");
   const [color, setColor] = useState("");
   const [fee, setFee] = useState("");
+  const [photos, setPhotos] = useState<string[]>([]);
+  const fileRef = useRef<HTMLInputElement | null>(null);
 
   const feeNum = parseFloat(fee || "0") || 0;
   const canSubmit =
     plate.trim().length > 0 && makeModel.trim().length > 0 && !submitting;
+
+  function handleFiles(files: FileList | null) {
+    if (!files || files.length === 0) return;
+    const remaining = Math.max(0, MAX_PHOTOS - photos.length);
+    const chosen = Array.from(files).slice(0, remaining);
+    chosen.forEach((file) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        if (typeof reader.result === "string") {
+          setPhotos((prev) =>
+            prev.length >= MAX_PHOTOS ? prev : [...prev, reader.result as string],
+          );
+        }
+      };
+      reader.readAsDataURL(file);
+    });
+  }
 
   function submit() {
     if (!canSubmit) return;
@@ -1607,6 +2317,7 @@ function AddBootPage({
       color: color.trim() || null,
       bootFee: feeNum,
       bootedAt: new Date().toISOString(),
+      photos,
     });
   }
 
@@ -1720,9 +2431,69 @@ function AddBootPage({
             />
           </div>
 
-          <div className="mt-3 flex items-center gap-2 text-[12px] font-medium" style={{ color: ENF.ink3 }}>
-            <Camera className="h-4 w-4 shrink-0" />
-            Add evidence photos from the case after the boot is placed.
+          {/* Evidence photos — captured on the intake form (optional). */}
+          <label
+            className="mt-3 block text-[11px] font-semibold uppercase tracking-[0.04em]"
+            style={{ color: ENF.ink3 }}
+          >
+            Evidence photos{" "}
+            <span className="normal-case" style={{ color: ENF.ink3 }}>
+              (optional, up to {MAX_PHOTOS})
+            </span>
+          </label>
+          <input
+            ref={fileRef}
+            type="file"
+            accept="image/*"
+            multiple
+            className="hidden"
+            onChange={(e) => {
+              handleFiles(e.target.files);
+              e.target.value = "";
+            }}
+            data-testid="input-addboot-photo"
+          />
+          <div className="mt-1.5 flex flex-wrap gap-2.5">
+            {photos.map((src, i) => (
+              <div
+                key={i}
+                className="relative h-[88px] w-[120px] overflow-hidden rounded-[12px]"
+                style={{ border: `1px solid ${ENF.line}` }}
+                data-testid={`photo-thumb-${i}`}
+              >
+                <img
+                  src={src}
+                  alt={`Evidence ${i + 1}`}
+                  className="h-full w-full object-cover"
+                />
+                <button
+                  type="button"
+                  onClick={() => setPhotos((p) => p.filter((_, j) => j !== i))}
+                  className="absolute right-1 top-1 flex h-[22px] w-[22px] items-center justify-center rounded-full"
+                  style={{ background: "rgba(13,27,42,.72)" }}
+                  aria-label="Remove photo"
+                  data-testid={`button-addboot-remove-photo-${i}`}
+                >
+                  <X className="h-[13px] w-[13px] text-white" />
+                </button>
+              </div>
+            ))}
+            {photos.length < MAX_PHOTOS && (
+              <button
+                type="button"
+                onClick={() => fileRef.current?.click()}
+                className="flex h-[88px] w-[120px] flex-col items-center justify-center gap-1.5 rounded-[12px]"
+                style={{
+                  background: ENF.accentSoft,
+                  border: `1.5px dashed ${ENF.accent}`,
+                  color: ENF.accentInk,
+                }}
+                data-testid="button-addboot-add-photo"
+              >
+                <Camera className="h-[20px] w-[20px]" />
+                <span className="text-[12px] font-semibold">Add photo</span>
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -1747,8 +2518,33 @@ function AddBootPage({
 // ---------------------------------------------------------------------------
 // Page 7 — History (resolved cases)
 // ---------------------------------------------------------------------------
-function HistoryPage({ cases, loading }: { cases: EnfCase[]; loading: boolean }) {
+function HistoryPage({
+  cases,
+  paidCarsToday,
+  loading,
+  paidLoading,
+}: {
+  cases: EnfCase[];
+  paidCarsToday: PaidCarLite[];
+  loading: boolean;
+  paidLoading: boolean;
+}) {
   const collected = cases.reduce((s, c) => s + (c.amountCollected || 0), 0);
+  // Plain-text search across plate + make/model + color for both lists.
+  const [q, setQ] = useState("");
+  const needle = q.trim().toLowerCase();
+  const matchPaid = (c: PaidCarLite) =>
+    !needle ||
+    c.licensePlate.toLowerCase().includes(needle) ||
+    (c.makeModel ?? "").toLowerCase().includes(needle) ||
+    (c.color ?? "").toLowerCase().includes(needle);
+  const matchCase = (c: EnfCase) =>
+    !needle ||
+    c.licensePlate.toLowerCase().includes(needle) ||
+    (c.makeModel ?? "").toLowerCase().includes(needle) ||
+    (c.color ?? "").toLowerCase().includes(needle);
+  const filteredPaid = paidCarsToday.filter(matchPaid);
+  const filteredCases = cases.filter(matchCase);
   return (
     <div className="pb-6" data-testid="page-enforcer-history">
       <div className="px-4 pt-4">
@@ -1769,17 +2565,107 @@ function HistoryPage({ cases, loading }: { cases: EnfCase[]; loading: boolean })
           </div>
         </div>
       </div>
+
+      {/* Search bar — filters both paid cars and resolved cases. */}
+      <div className="px-4 pt-4">
+        <QueueSearch value={q} onChange={setQ} testid="input-history-search" />
+      </div>
+
+      {/* ----- Active paid cars today (Stripe + manual) ----- */}
+      <div className="flex items-center justify-between px-4 pt-5">
+        <div className="text-[13px] font-bold uppercase tracking-[0.04em]" style={{ color: ENF.ink2 }}>
+          Active paid cars today
+        </div>
+        <span
+          className="rounded-full px-2 py-0.5 text-[11px] font-bold"
+          style={{ background: ENF.greenSoft, color: ENF.green }}
+          data-testid="paid-today-count"
+        >
+          {filteredPaid.length} paid
+        </span>
+      </div>
+      <div className="px-4 pt-2.5">
+        {paidLoading ? (
+          <CardSkeleton />
+        ) : filteredPaid.length === 0 ? (
+          <EmptyState
+            icon={<CircleDollarSign className="h-7 w-7" />}
+            title={needle ? "No matching paid cars" : "No paid cars yet today"}
+            sub={
+              needle
+                ? "Try a different plate or make/model."
+                : "Cars paid today (Stripe or manual) will appear here."
+            }
+          />
+        ) : (
+          // Fixed-height scroll table: keeps the History page from growing to the
+          // bottom no matter how many cars were paid. The list scrolls inside
+          // this box; the page stays a stable, predictable height.
+          <div
+            className="overflow-y-auto rounded-2xl p-2.5"
+            style={{
+              maxHeight: "22rem",
+              background: ENF.fieldBg ?? "#f4f7fa",
+              border: `1px solid ${ENF.line}`,
+              WebkitOverflowScrolling: "touch",
+            }}
+            data-testid="scroll-paid-today"
+          >
+            <div className="space-y-2.5" data-testid="list-paid-today">
+            {filteredPaid.map((c) => (
+              <div
+                key={c.id}
+                className="rounded-2xl border bg-white p-3.5"
+                style={{ borderColor: ENF.line }}
+                data-testid={`card-paid-${c.id}`}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <PlateText plate={c.licensePlate} size={17} />
+                    <div className="mt-0.5 truncate text-[12.5px]" style={{ color: ENF.ink2 }}>
+                      {[c.makeModel, c.color].filter(Boolean).join(" \u00b7 ") || "\u2014"}
+                    </div>
+                  </div>
+                  <span
+                    className="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide"
+                    style={
+                      c.source === "stripe"
+                        ? { background: ENF.accentSoft, color: ENF.accent }
+                        : { background: ENF.greenSoft, color: ENF.green }
+                    }
+                    data-testid={`paid-source-${c.id}`}
+                  >
+                    {c.source === "stripe" ? "Stripe" : "Manual"}
+                  </span>
+                </div>
+                <div
+                  className="mt-2.5 flex items-center justify-between border-t pt-2.5 text-[11.5px]"
+                  style={{ borderColor: ENF.line, color: ENF.ink3 }}
+                >
+                  <span className="truncate">{dateTimeLabel(c.paidAt)}</span>
+                </div>
+              </div>
+            ))}
+            </div>
+          </div>
+        )}
+      </div>
+
       <SectionTitle>Resolved cases</SectionTitle>
       {loading ? (
         <CardSkeleton />
-      ) : cases.length === 0 ? (
+      ) : filteredCases.length === 0 ? (
         <EmptyState
           icon={<Clock3 className="h-7 w-7" />}
-          title="Nothing resolved yet"
-          sub="Paid and released cases from today will appear here."
+          title={needle ? "No matching cases" : "Nothing resolved yet"}
+          sub={
+            needle
+              ? "Try a different plate or make/model."
+              : "Paid and released cases from today will appear here."
+          }
         />
       ) : (
-        <CaseList cases={cases} onOpenCase={() => {}} testid="list-history" />
+        <CaseList cases={filteredCases} onOpenCase={() => {}} testid="list-history" />
       )}
     </div>
   );
@@ -1792,10 +2678,12 @@ function ProfileMenu({
   userName,
   onClose,
   onGoProfile,
+  onLogout,
 }: {
   userName: string;
   onClose: () => void;
   onGoProfile: () => void;
+  onLogout: () => void;
 }) {
   return (
     <div
@@ -1825,6 +2713,16 @@ function ProfileMenu({
           Profile & settings
           <ChevronRight className="h-4 w-4" style={{ color: ENF.ink3 }} />
         </button>
+        <button
+          type="button"
+          onClick={onLogout}
+          className="mt-2.5 flex w-full items-center justify-center gap-2 rounded-[0.875rem] px-4 py-3.5 text-[15px] font-bold"
+          style={{ background: ENF.redSoft, color: ENF.red }}
+          data-testid="button-menu-logout"
+        >
+          <LogOut className="h-4 w-4" />
+          Sign out
+        </button>
       </div>
     </div>
   );
@@ -1834,10 +2732,12 @@ function ProfileSheet({
   userName,
   lotName,
   onBack,
+  onLogout,
 }: {
   userName: string;
   lotName: string;
   onBack: () => void;
+  onLogout: () => void;
 }) {
   return (
     <div className="fixed inset-0 z-30 bg-white" data-testid="page-enforcer-profile">
@@ -1868,6 +2768,19 @@ function ProfileSheet({
           <Wifi className="h-4 w-4" />
           Live data — actions update real cases.
         </div>
+
+        {/* Sign out — lives inside the settings screen so the enforcer can end
+            the session here, not only from the bottom-sheet menu. */}
+        <button
+          type="button"
+          onClick={onLogout}
+          className="mt-2 flex w-full items-center justify-center gap-2 rounded-[0.875rem] px-4 py-3.5 text-[15px] font-bold"
+          style={{ background: ENF.redSoft, color: ENF.red }}
+          data-testid="button-profile-logout"
+        >
+          <LogOut className="h-4 w-4" />
+          Sign out
+        </button>
       </div>
     </div>
   );

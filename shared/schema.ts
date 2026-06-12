@@ -186,6 +186,8 @@ export const bootRequests = sqliteTable("boot_requests", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   licensePlate: text("license_plate").notNull(),
   makeModel: text("make_model").notNull(),
+  // Optional vehicle color so the enforcer can identify the car quickly.
+  color: text("color"),
   // Optional suggested fee + free-text note from the attendant.
   suggestedFee: real("suggested_fee").notNull().default(0),
   note: text("note").notNull().default(""),
@@ -207,6 +209,7 @@ export const bootRequests = sqliteTable("boot_requests", {
 export const insertBootRequestSchema = z.object({
   licensePlate: z.string().trim().min(1, "License plate is required"),
   makeModel: z.string().trim().min(1, "Make & model is required"),
+  color: z.string().trim().max(40).optional().nullable(),
   suggestedFee: z.coerce.number().min(0).optional().default(0),
   note: z.string().trim().max(500).optional().default(""),
   photos: z

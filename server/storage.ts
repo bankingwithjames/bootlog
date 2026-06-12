@@ -132,6 +132,7 @@ function rowToRequest(row: any): BootRequest {
     id: row.id,
     licensePlate: row.license_plate,
     makeModel: row.make_model,
+    color: row.color ?? null,
     suggestedFee: row.suggested_fee ?? 0,
     note: row.note ?? "",
     photos: parsePhotos(row.photos),
@@ -295,6 +296,8 @@ export interface IStorage {
   addCashCollection(row: InsertCashCollection): Promise<CashCollection>;
   getCashForCollector(collectorId: number): Promise<CashCollection[]>;
   getCashSummaryForCollector(collectorId: number): Promise<CashSummary>;
+  // Org-wide cash ledger (admin reconciliation view), newest first.
+  getAllCashCollections(): Promise<CashCollection[]>;
   // Boot requests
   getBootRequests(): Promise<BootRequest[]>;
   getBootRequest(id: number): Promise<BootRequest | undefined>;
@@ -324,6 +327,7 @@ export interface IStorage {
     rows: InsertPaidSnapshot[],
   ): Promise<void>;
   addManualSnapshot(row: InsertPaidSnapshot): Promise<PaidSnapshot>;
+  deleteManualSnapshot(sessionId: string): Promise<{ changes: number }>;
   getAllSnapshots(): Promise<PaidSnapshot[]>;
   // Retention
   pruneOlderThan(cutoffDay: string, cutoffIso: string): Promise<void>;
@@ -483,6 +487,7 @@ export class DatabaseStorage implements IStorage {
         .insert({
           license_plate: rest.licensePlate,
           make_model: rest.makeModel,
+          color: rest.color ?? null,
           suggested_fee: rest.suggestedFee ?? 0,
           note: rest.note ?? "",
           photos: JSON.stringify(photos.slice(0, 5)),
@@ -932,6 +937,17 @@ export class DatabaseStorage implements IStorage {
     return rowToCashCollection(inserted);
   }
 
+  async getAllCashCollections(): Promise<CashCollection[]> {
+    const rows = check(
+      await supabase
+        .from("cash_collections")
+        .select("*")
+        .order("collected_at", { ascending: false }),
+      "getAllCashCollections",
+    );
+    return (rows ?? []).map(rowToCashCollection);
+  }
+
   async getCashForCollector(
     collectorId: number,
   ): Promise<CashCollection[]> {
@@ -1120,6 +1136,24 @@ export class DatabaseStorage implements IStorage {
       "addManualSnapshot",
     );
     return rowToSnapshot(inserted);
+  }
+
+  // Delete a MANUAL paid-car entry by its session id. The `source = manual`
+  // filter is a hard guard so Stripe rows can never be removed through this
+  // path — only attendant/admin-entered manual rows are deletable.
+  async deleteManualSnapshot(
+    sessionId: string,
+  ): Promise<{ changes: number }> {
+    const rows = check(
+      await supabase
+        .from("paid_snapshots")
+        .delete()
+        .eq("session_id", sessionId)
+        .eq("source", "manual")
+        .select("id"),
+      "deleteManualSnapshot",
+    );
+    return { changes: (rows ?? []).length };
   }
 
   async getAllSnapshots(): Promise<PaidSnapshot[]> {

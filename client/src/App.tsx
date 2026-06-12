@@ -12,6 +12,7 @@ import Login from "@/pages/login";
 import ChangePassword from "@/pages/change-password";
 import NotFound from "@/pages/not-found";
 import { EnforcerPreview } from "@/components/enforcer-preview/EnforcerPreview";
+import { AdminMobilePreview } from "@/components/admin-preview/AdminMobilePreview";
 
 class ErrorBoundary extends Component<
   { children: ReactNode },
@@ -64,6 +65,13 @@ function EnforcerPreviewRoute() {
   return <EnforcerPreview />;
 }
 
+// Route guard for the admin mobile management dashboard (preview): admin only.
+function AdminPreviewRoute() {
+  const { is } = useAuth();
+  if (!is("admin")) return <NotFound />;
+  return <AdminMobilePreview />;
+}
+
 // Home landing. Enforcers now default to the mobile field experience (the
 // cutover); admins and attendants keep the desktop dashboard. Admins can still
 // reach the mobile view via the /#/preview/enforcer-mobile route.
@@ -78,6 +86,7 @@ function AppRouter() {
     <Switch>
       <Route path="/" component={HomeRoute} />
       <Route path="/preview/enforcer-mobile" component={EnforcerPreviewRoute} />
+      <Route path="/preview/admin-mobile" component={AdminPreviewRoute} />
       <Route component={NotFound} />
     </Switch>
   );

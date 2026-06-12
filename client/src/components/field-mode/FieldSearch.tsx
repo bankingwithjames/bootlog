@@ -180,8 +180,13 @@ export function FieldSearch({
               {`Paid vehicles · ${results.length}`}
             </h3>
             <div
-              className="overflow-hidden rounded-[0.875rem]"
-              style={{ background: "#fff", border: `1px solid ${FIELD.line}` }}
+              className="overflow-y-auto overscroll-contain rounded-[0.875rem]"
+              style={{
+                background: "#fff",
+                border: `1px solid ${FIELD.line}`,
+                maxHeight: "22rem",
+                WebkitOverflowScrolling: "touch",
+              }}
               data-testid="search-results"
             >
               {results.map((c) => (

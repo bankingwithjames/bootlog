@@ -47,12 +47,15 @@ async function buildAll() {
 
   await mkdir("api", { recursive: true });
 
+  // Bundle the catch-all function fully self-contained so Vercel never has to
+  // resolve our ../server import graph at runtime. Output as a .js catch-all
+  // (api/[[...path]].js) which Vercel routes every /api/* request to.
   await esbuild({
     entryPoints: ["server/serverless/entry.ts"],
     platform: "node",
     bundle: true,
     format: "cjs",
-    outfile: "api/index.cjs",
+    outfile: "api/[[...path]].js",
     define: {
       "process.env.NODE_ENV": '"production"',
     },

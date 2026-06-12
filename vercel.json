@@ -5,7 +5,8 @@
   "outputDirectory": "dist/public",
   "functions": {
     "api/[[...path]].js": {
-      "maxDuration": 30
+      "maxDuration": 30,
+      "includeFiles": "dist/server.cjs"
     }
   },
   "rewrites": [

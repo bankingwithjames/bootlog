@@ -1,10 +1,7 @@
-// Vercel serverless entry point.
-//
-// Vercel's @vercel/node runtime expects an exported request handler, not a
-// server that binds a port. This module builds the same Express app used in
-// local/standalone mode (via createServerlessApp) and exports it as the
-// handler. The app instance is cached across warm invocations so route
-// registration + DB seeding only runs on a cold start.
+// Serverless entry for Vercel (@vercel/node legacy builder).
+// Exports a request handler; never binds a port. esbuild bundles this file
+// and ALL ../server imports into a single self-contained CommonJS module, so
+// there is nothing for Vercel to resolve at runtime.
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { createServerlessApp } from "../app";
 
@@ -17,10 +14,22 @@ function getApp() {
   return appPromise;
 }
 
-export default async function handler(
+module.exports = async function handler(
   req: IncomingMessage,
   res: ServerResponse,
 ) {
-  const app = await getApp();
-  return (app as any)(req, res);
-}
+  try {
+    const app = await getApp();
+    return (app as any)(req, res);
+  } catch (err: any) {
+    res.statusCode = 500;
+    res.setHeader("Content-Type", "application/json");
+    res.end(
+      JSON.stringify({
+        error: "init_failed",
+        message: String(err?.message || err),
+        stack: String(err?.stack || "").split("\n").slice(0, 6),
+      }),
+    );
+  }
+};

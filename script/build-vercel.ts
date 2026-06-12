@@ -1,6 +1,6 @@
 import { build as esbuild } from "esbuild";
 import { build as viteBuild } from "vite";
-import { rm, readFile, mkdir } from "node:fs/promises";
+import { rm, readFile, mkdir, writeFile } from "node:fs/promises";
 
 // Vercel build: produces a self-contained serverless function so Vercel's
 // bundler never has to resolve our deep server import graph. Mirrors the
@@ -47,15 +47,17 @@ async function buildAll() {
 
   await mkdir("api", { recursive: true });
 
-  // Bundle the catch-all function fully self-contained so Vercel never has to
-  // resolve our ../server import graph at runtime. Output as a .js catch-all
-  // (api/[[...path]].js) which Vercel routes every /api/* request to.
+  // Bundle the handler + ALL ../server imports into one self-contained CJS
+  // module at dist/server.cjs. The tiny api/[[...path]].js shim re-exports it;
+  // Vercel traces the require and includes the bundle. Because the heavy code
+  // lives in dist/server.cjs (not directly in /api), Vercel's @vercel/node
+  // builder does not re-bundle our import graph — it just includes the file.
   await esbuild({
     entryPoints: ["server/serverless/entry.ts"],
     platform: "node",
     bundle: true,
     format: "cjs",
-    outfile: "api/[[...path]].js",
+    outfile: "dist/server.cjs",
     define: {
       "process.env.NODE_ENV": '"production"',
     },
@@ -63,6 +65,13 @@ async function buildAll() {
     external: externals,
     logLevel: "info",
   });
+
+  // Tiny catch-all shim that Vercel detects as the function. It requires the
+  // prebuilt, fully-bundled handler. include_files ensures the bundle ships.
+  await writeFile(
+    "api/[[...path]].js",
+    'module.exports = require("../dist/server.cjs");\n',
+  );
 }
 
 buildAll().catch((err) => {

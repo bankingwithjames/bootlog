@@ -1,3 +1,4 @@
+import "./load-env"; // MUST be first: loads env before any module reads process.env
 import { createApp, log } from "./app";
 import { serveStatic } from "./static";
 

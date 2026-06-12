@@ -10,7 +10,8 @@
     "build:vercel": "tsx script/build-vercel.ts",
     "start": "NODE_ENV=production node dist/index.cjs",
     "check": "tsc",
-    "db:push": "drizzle-kit push"
+    "db:push": "drizzle-kit push",
+    "deploy": "npm run build:vercel && vercel deploy --prod --yes"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",

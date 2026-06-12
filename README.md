@@ -3,15 +3,31 @@
 Vehicle booting & parking enforcement management app for Millennialz Parking, LLC.
 Built with React + Vite (frontend), Express (API), Drizzle ORM, and Supabase (database).
 
-## Edit from anywhere → live site auto-updates
+## Edit from anywhere → live site updates
 
-This repo is wired for continuous deployment via Vercel:
+Live URL: **https://bootlog.vercel.app**
 
-1. Edit the code in any tool — Cursor, Claude Code, GitHub Copilot, VS Code, or the GitHub web editor.
-2. Commit and push to the `main` branch.
-3. Vercel auto-builds and deploys to the live URL within ~1–2 minutes.
+This repo deploys to Vercel. Edit the code in any tool — Cursor, Claude Code,
+GitHub Copilot, VS Code, or the GitHub web editor — then publish with one command:
 
-The Supabase database lives outside the host, so it keeps working no matter where the app is deployed.
+```bash
+npm run deploy        # builds and pushes a new production deploy to bootlog.vercel.app
+```
+
+The Supabase database lives outside the host, so it keeps working no matter where
+the app is deployed.
+
+### Optional: true auto-deploy on every git push
+
+To make every `git push` to `main` deploy automatically (no `npm run deploy` step),
+authorize the Vercel GitHub App once — this is a one-time browser step that only the
+repo owner can do:
+
+1. Open the Vercel project → **Settings → Git**.
+2. Click **Connect Git Repository**, choose **GitHub**, and authorize the Vercel app
+   for `bankingwithjames/bootlog` when GitHub prompts you.
+
+Once connected, every push to `main` triggers an automatic build and deploy.
 
 ## Local development
 
@@ -27,6 +43,12 @@ npm run dev            # starts Express + Vite on http://localhost:5000
 npm run build          # outputs dist/index.cjs (server) + dist/public (static)
 npm start              # runs the production server (reads PORT env var, default 5000)
 ```
+
+Vercel uses a separate serverless build (`npm run build:vercel`) that bundles the
+entire Express app into a single self-contained `dist/server.cjs` handler. The
+`vercel.json` `builds` array ships that bundle as-is to a Vercel Function and serves
+`dist/public` as static assets from the CDN. This is wired up already — `npm run deploy`
+runs it for you.
 
 ## Environment variables
 

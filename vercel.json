@@ -1,9 +1,8 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "buildCommand": "npm run build:vercel",
+  "buildCommand": "npm run build:client",
   "outputDirectory": "dist/public",
   "rewrites": [
-    { "source": "/api/(.*)", "destination": "/api/index.cjs" },
-    { "source": "/((?!assets/|favicon).*)", "destination": "/index.html" }
+    { "source": "/((?!api/|assets/|favicon).*)", "destination": "/index.html" }
   ]
 }

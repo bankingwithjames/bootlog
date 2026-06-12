@@ -16,5 +16,3 @@ data.db-journal
 .DS_Store
 .vercel
 
-# Vercel serverless build artifact
-api/index.cjs

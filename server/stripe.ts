@@ -1,22 +1,30 @@
 // Reads paid Checkout Sessions from Stripe and normalizes car details.
 //
-// Auth — two supported paths, preferred first:
+// Auth — three supported paths, preferred first:
 //
-// 1. Credential proxy (DURABLE). When the server is started with
-//    api_credentials=['custom-cred:api.stripe.com'], the platform injects
-//    CUSTOM_CRED_API_STRIPE_COM_URL (a stable proxy endpoint that stands in for
-//    https://api.stripe.com) and CUSTOM_CRED_API_STRIPE_COM_TOKEN. We send the
-//    token as the `x-api-key` header and the proxy injects the real Stripe
-//    Authorization before forwarding. This token is stable for the life of the
-//    deployment and does NOT expire mid-session — so the live data keeps
-//    working instead of dying after ~15 min like the rotating HTTPS_PROXY token.
+// 1. Direct secret key (STANDALONE HOSTS, e.g. Vercel). When STRIPE_SECRET_KEY
+//    is set (an sk_live_/rk_live_ value), we call api.stripe.com directly with
+//    `Authorization: Bearer <key>`. This is the correct path for any normal
+//    public host (Vercel, etc.) that can reach Stripe directly and where the
+//    Perplexity credential proxy / HTTPS_PROXY do NOT exist. The key value comes
+//    only from the deployment's env var — never hard-coded in source.
 //
-// 2. HTTPS_PROXY fallback (LEGACY). Older path that routes plain requests to
+// 2. Credential proxy (DURABLE — Perplexity sandbox / published pplx.app). When
+//    the server is started with api_credentials=['custom-cred:api.stripe.com'],
+//    the platform injects CUSTOM_CRED_API_STRIPE_COM_URL (a stable proxy
+//    endpoint that stands in for https://api.stripe.com) and
+//    CUSTOM_CRED_API_STRIPE_COM_TOKEN. We send the token as the `x-api-key`
+//    header and the proxy injects the real Stripe Authorization before
+//    forwarding. Stable for the life of the deployment.
+//
+// 3. HTTPS_PROXY fallback (LEGACY). Older path that routes plain requests to
 //    api.stripe.com through the rotating inline proxy. Kept only as a fallback
-//    for environments where the CUSTOM_CRED_* vars are absent. The inline proxy
-//    token expires, so this path can start returning 407s after a while.
+//    for environments where neither STRIPE_SECRET_KEY nor the CUSTOM_CRED_* vars
+//    are present. The inline proxy token expires, so this path can start
+//    returning 407s after a while.
 //
-// No Stripe key ever lives in code under either path.
+// Under paths 2 and 3 no Stripe key lives in code; under path 1 the key is
+// supplied via env var only.
 //
 // Data quirk handled here: this account's Checkout custom-field KEYS are
 // scrambled (key "makemodel" holds the color, key "color" holds the make/model),
@@ -38,13 +46,18 @@ export interface PaidCar {
 import { ProxyAgent, request, type Dispatcher } from "undici";
 
 // --- Path selection -------------------------------------------------------
-// Prefer the durable credential-proxy env vars; fall back to HTTPS_PROXY.
+// Priority: (1) direct STRIPE_SECRET_KEY, (2) durable credential proxy,
+// (3) legacy HTTPS_PROXY.
+const secretKey = (process.env.STRIPE_SECRET_KEY || "").trim();
+const useDirectKey = Boolean(secretKey);
+
 const credUrl = (process.env.CUSTOM_CRED_API_STRIPE_COM_URL || "").replace(
   /\/+$/,
   "",
 );
 const credToken = process.env.CUSTOM_CRED_API_STRIPE_COM_TOKEN || "";
-const useCredProxy = Boolean(credUrl && credToken);
+// Only use the credential proxy when a direct key is NOT provided.
+const useCredProxy = !useDirectKey && Boolean(credUrl && credToken);
 
 // Base path for the Stripe REST API. Under the credential proxy the host is the
 // injected proxy URL; otherwise we hit api.stripe.com directly.
@@ -52,9 +65,10 @@ const STRIPE_BASE = useCredProxy
   ? `${credUrl}/v1`
   : "https://api.stripe.com/v1";
 
-// HTTPS_PROXY fallback dispatcher (only used when not on the credential proxy).
+// HTTPS_PROXY fallback dispatcher (only used when neither the direct key nor
+// the credential proxy is configured).
 let dispatcher: Dispatcher | undefined;
-if (!useCredProxy) {
+if (!useDirectKey && !useCredProxy) {
   const proxyUrl =
     process.env.HTTPS_PROXY ||
     process.env.https_proxy ||
@@ -69,8 +83,10 @@ async function stripeGet(
   url: string,
 ): Promise<{ ok: boolean; status: number; text: () => Promise<string> }> {
   const headers: Record<string, string> = { Accept: "application/json" };
+  // Direct key: standard Stripe Bearer auth straight to api.stripe.com.
+  if (useDirectKey) headers["Authorization"] = `Bearer ${secretKey}`;
   // Credential proxy expects the token as x-api-key; it adds the real auth.
-  if (useCredProxy) headers["x-api-key"] = credToken;
+  else if (useCredProxy) headers["x-api-key"] = credToken;
 
   const r = await request(url, {
     method: "GET",

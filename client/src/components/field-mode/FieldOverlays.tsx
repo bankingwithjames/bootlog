@@ -719,16 +719,81 @@ export function AttendantWidget({
 // ---------------------------------------------------------------------------
 // Cash tracker — standalone running-total card (recent cash entries).
 // ---------------------------------------------------------------------------
+// Module-level memory of the last reconciliation timestamp the attendant has
+// already acknowledged (dismissed). Kept in a module variable rather than
+// localStorage/sessionStorage to satisfy the no-client-storage compliance rule.
+// It survives component remounts within a session but resets on full reload —
+// acceptable, since a reload re-shows the latest verification confirmation.
+let acknowledgedReconciledAt: string | null = null;
+
 export function CashTracker({ cash }: { cash: CashSummary | undefined }) {
   const owed = cash?.owedTotal ?? 0;
   const reconciled = cash?.reconciledTotal ?? 0;
-  const recent = (cash?.recent ?? []).filter((c) => !c.reconciled).slice(0, 5);
+  // Show EVERY unverified (owed) cash entry — no truncation. The list scrolls
+  // and stays until an admin / permitted user verifies the count (which
+  // reconciles the entries and drops them out of this unverified view).
+  const unverified = (cash?.recent ?? []).filter((c) => !c.reconciled);
+  const owedCount = cash?.owedCount ?? unverified.length;
   const discreet = useDiscretion();
+
+  // "Cash verified by <admin> — count reset" confirmation banner. Shows when
+  // the backend reports a reconciliation timestamp the attendant hasn't yet
+  // dismissed. State is seeded from the module-level ack so the banner stays
+  // dismissed across remounts but reappears for a newer verification.
+  const lastReconciledAt = cash?.lastReconciledAt ?? null;
+  const lastReconciledByName = cash?.lastReconciledByName ?? null;
+  const [ackedAt, setAckedAt] = useState<string | null>(acknowledgedReconciledAt);
+  const showVerifiedBanner =
+    !!lastReconciledAt && lastReconciledAt !== ackedAt;
+  const dismissVerifiedBanner = () => {
+    acknowledgedReconciledAt = lastReconciledAt;
+    setAckedAt(lastReconciledAt);
+  };
 
   return (
     <section data-testid="field-cash-tracker">
-      <div className="mb-2 flex items-center gap-1.5 text-[13px] font-bold" style={{ color: FIELD.ink }}>
-        <Banknote className="h-4 w-4" style={{ color: FIELD.orange }} /> Cash tracker
+      {showVerifiedBanner && (
+        <div
+          className="mb-2 flex items-start gap-2.5 rounded-[12px] px-3 py-2.5"
+          style={{ background: "#e7f6ee", border: "1px solid #15924f33" }}
+          data-testid="cash-verified-banner"
+        >
+          <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" style={{ color: "#15924f" }} />
+          <div className="min-w-0 flex-1">
+            <div className="text-[12.5px] font-bold" style={{ color: "#0f6b39" }}>
+              {lastReconciledByName
+                ? `Cash verified by ${lastReconciledByName} — count reset`
+                : "Cash verified — count reset"}
+            </div>
+            <div className="text-[11px]" style={{ color: "#2f8a5c" }}>
+              {timeAgo(lastReconciledAt)} · your verified entries cleared from the unverified list.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={dismissVerifiedBanner}
+            aria-label="Dismiss"
+            className="shrink-0 rounded-md p-0.5"
+            style={{ color: "#2f8a5c" }}
+            data-testid="cash-verified-banner-dismiss"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
+      <div className="mb-2 flex items-center justify-between">
+        <div className="flex items-center gap-1.5 text-[13px] font-bold" style={{ color: FIELD.ink }}>
+          <Banknote className="h-4 w-4" style={{ color: FIELD.orange }} /> Cash tracker
+        </div>
+        {owedCount > 0 && (
+          <span
+            className="rounded-full px-2 py-0.5 text-[11px] font-bold"
+            style={{ background: "#fff3ea", color: FIELD.orange, border: `1px solid ${FIELD.orange}33` }}
+            data-testid="cash-unverified-count"
+          >
+            {owedCount} unverified
+          </span>
+        )}
       </div>
       <div
         className="overflow-hidden rounded-[14px]"
@@ -752,37 +817,62 @@ export function CashTracker({ cash }: { cash: CashSummary | undefined }) {
             </div>
           </div>
         </div>
-        {recent.length === 0 ? (
+        {unverified.length === 0 ? (
           <div className="px-3.5 py-6 text-center text-[12.5px]" style={{ color: FIELD.ink3 }} data-testid="cash-recent-empty">
-            No cash logged yet. Record a cash payment to start your running total.
+            No unverified cash. Record a cash payment to start your running total.
           </div>
         ) : (
-          recent.map((c, i) => (
+          <>
+            {/* Column header for the scrollable unverified table. */}
             <div
-              key={c.id}
-              className="flex items-center gap-2.5 px-3.5 py-2.5"
-              style={{ borderBottom: i === recent.length - 1 ? "none" : `1px solid ${FIELD.line}` }}
-              data-testid={`cash-row-${c.id}`}
+              className="flex items-center gap-2.5 px-3.5 py-1.5 text-[10px] font-bold uppercase tracking-[0.05em]"
+              style={{ color: FIELD.ink3, background: "#fafbfc", borderBottom: `1px solid ${FIELD.line}` }}
             >
-              <span
-                className="shrink-0 rounded-md px-1.5 py-1 text-[11.5px] font-bold tracking-[0.04em] text-white"
-                style={{ fontFamily: FIELD_MONO, background: "#1a1d24", border: "1px solid #333" }}
-              >
-                {c.licensePlate}
-              </span>
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-[12.5px] font-semibold" style={{ color: FIELD.ink }}>
-                  {c.makeModel || "Vehicle"}
-                </span>
-                <span className="block text-[11px]" style={{ color: FIELD.ink3 }}>
-                  {timeAgo(c.collectedAt)}
-                </span>
-              </span>
-              <span className="shrink-0 text-[13px] font-extrabold" style={{ fontFamily: FIELD_MONO, color: FIELD.ink }}>
-                {currency(c.amount)}
-              </span>
+              <span className="shrink-0" style={{ width: 64 }}>Plate</span>
+              <span className="min-w-0 flex-1">Vehicle</span>
+              <span className="shrink-0">Amount</span>
             </div>
-          ))
+            {/* Scroll region — shows ALL unverified entries; scrolls past ~5 rows. */}
+            <div
+              className="overflow-y-auto overscroll-contain"
+              style={{ maxHeight: 264 }}
+              data-testid="cash-unverified-scroll"
+            >
+              {unverified.map((c, i) => (
+                <div
+                  key={c.id}
+                  className="flex items-center gap-2.5 px-3.5 py-2.5"
+                  style={{ borderBottom: i === unverified.length - 1 ? "none" : `1px solid ${FIELD.line}` }}
+                  data-testid={`cash-row-${c.id}`}
+                >
+                  <span
+                    className="shrink-0 rounded-md px-1.5 py-1 text-center text-[11.5px] font-bold tracking-[0.04em] text-white"
+                    style={{ fontFamily: FIELD_MONO, background: "#1a1d24", border: "1px solid #333", width: 64 }}
+                  >
+                    {c.licensePlate}
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-[12.5px] font-semibold" style={{ color: FIELD.ink }}>
+                      {c.makeModel || "Vehicle"}
+                    </span>
+                    <span className="block text-[11px]" style={{ color: FIELD.ink3 }}>
+                      {timeAgo(c.collectedAt)}
+                    </span>
+                  </span>
+                  <span className={`shrink-0 text-[13px] font-extrabold${discreetCls(discreet)}`} style={{ fontFamily: FIELD_MONO, color: FIELD.ink }}>
+                    {currency(c.amount)}
+                  </span>
+                </div>
+              ))}
+            </div>
+            {/* Footer note — the list clears once an admin verifies the count. */}
+            <div
+              className="px-3.5 py-2 text-[10.5px]"
+              style={{ color: FIELD.ink3, background: "#fafbfc", borderTop: `1px solid ${FIELD.line}` }}
+            >
+              Stays until an admin verifies the count.
+            </div>
+          </>
         )}
       </div>
     </section>

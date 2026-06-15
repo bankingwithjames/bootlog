@@ -187,6 +187,32 @@ export async function attachUser(
   next();
 }
 
+// Paths that remain reachable while a user still owes a forced password change.
+// Everything else is blocked server-side so the client-only gate can't be
+// bypassed by calling the API directly with a valid token.
+const PASSWORD_CHANGE_ALLOWLIST = new Set<string>([
+  "/api/auth/me",
+  "/api/auth/change-password",
+  "/api/auth/logout",
+]);
+
+// Blocks authenticated users who must change their password from reaching any
+// endpoint other than the allowlist above. Returns true if it handled (blocked)
+// the request.
+function blockedForPasswordChange(req: Request, res: Response): boolean {
+  if (req.user && req.user.mustChangePassword) {
+    // req.path excludes the query string; matches the mounted route path.
+    if (!PASSWORD_CHANGE_ALLOWLIST.has(req.path)) {
+      res.status(403).json({
+        message: "Password change required",
+        mustChangePassword: true,
+      });
+      return true;
+    }
+  }
+  return false;
+}
+
 // Requires a logged-in user.
 export function requireAuth(
   req: Request,
@@ -205,6 +231,7 @@ export function requireAuth(
     res.status(401).json({ message: "Sign in required" });
     return;
   }
+  if (blockedForPasswordChange(req, res)) return;
   next();
 }
 
@@ -227,6 +254,7 @@ export function requireRole(...roles: Role[]) {
         .json({ message: "You don't have permission to do that" });
       return;
     }
+    if (blockedForPasswordChange(req, res)) return;
     next();
   };
 }

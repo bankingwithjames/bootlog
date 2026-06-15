@@ -32,10 +32,15 @@ import {
   Trash2,
   Search as SearchIcon,
   X as XIcon,
+  Smartphone,
+  Monitor,
+  Repeat2,
+  ChevronRight as ChevronRightIcon,
 } from "lucide-react";
 import logoMark from "@assets/logo-mark.png";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
+import { useAuth } from "@/components/auth-provider";
 import type { EnforcementStage } from "@shared/schema";
 import {
   ENF,
@@ -80,10 +85,25 @@ type OverviewResponse = {
     collectedToday: number;
     allTotal: number;
     allCount: number;
-    holders: { id: number; name: string; owed: number; count: number }[];
+    holders: {
+      id: number;
+      name: string;
+      owed: number;
+      count: number;
+      // Each holder's individual unverified entries, so the admin can review
+      // and verify selected entries inline (per-entry checkboxes).
+      entries: {
+        id: number;
+        licensePlate: string;
+        makeModel: string;
+        amount: number;
+        collectedAt: string;
+      }[];
+    }[];
     recent: {
       id: number;
       licensePlate: string;
+      makeModel: string;
       amount: number;
       collectedByName: string;
       collectedAt: string;
@@ -167,6 +187,8 @@ type AdminTab = "dashboard" | "charts" | "history" | "settings";
 type RecentMode = "activity" | "paid";
 
 export function AdminMobilePreview() {
+  const { isAdmin } = useAuth();
+  const [viewMenuOpen, setViewMenuOpen] = useState(false);
   const [showMoney, setShowMoney] = useState(true);
   const [tab, setTab] = useState<AdminTab>("dashboard");
   const [recentMode, setRecentMode] = useState<RecentMode>("activity");
@@ -216,6 +238,98 @@ export function AdminMobilePreview() {
     },
   });
 
+  // ---- Cash verification (admin reviews + approves attendant cash) --------
+  // Which holder row is expanded, and the set of entry ids the admin has
+  // selected to verify. Selection is keyed by holder so switching rows is clean.
+  const [expandedHolder, setExpandedHolder] = useState<number | null>(null);
+  const [selectedCash, setSelectedCash] = useState<Record<number, boolean>>({});
+  // "Recent cash" tab filters: free-text search (plate / vehicle / attendant)
+  // and an optional single-day date filter (YYYY-MM-DD, local).
+  const [cashSearch, setCashSearch] = useState("");
+  const [cashDate, setCashDate] = useState("");
+  // The cash entry the admin is about to void (soft delete). When set, the
+  // confirm dialog is shown. Holds enough context to render a clear prompt.
+  const [voidTarget, setVoidTarget] = useState<{
+    id: number;
+    licensePlate: string;
+    makeModel: string;
+    amount: number;
+    collectedByName: string;
+  } | null>(null);
+
+  const verifyCashMutation = useMutation({
+    mutationFn: async (ids: number[]) => {
+      const res = await apiRequest("POST", "/api/cash/verify", { ids });
+      return res.json() as Promise<{
+        verifiedCount: number;
+        verifiedTotal: number;
+      }>;
+    },
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({
+        queryKey: ["/api/preview/admin/overview"],
+      });
+      // The attendant's own tracker reads /api/cash/mine — refresh it too so the
+      // count resets for them on their next poll.
+      queryClient.invalidateQueries({ queryKey: ["/api/cash/mine"] });
+      setSelectedCash({});
+      setExpandedHolder(null);
+      toast({
+        title: "Cash verified",
+        description: `${result.verifiedCount} ${
+          result.verifiedCount === 1 ? "entry" : "entries"
+        } approved · ${money(result.verifiedTotal)}. The attendant's tracker has been reset.`,
+      });
+    },
+    onError: (err: Error) => {
+      toast({
+        title: "Could not verify cash",
+        description: err.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  // ---- Cash void (admin soft-deletes an erroneous cash entry) -------------
+  // Voiding keeps the row in the ledger for audit but removes it from every
+  // total, the holder tracker, the recent list, and the attendant's view.
+  const voidCashMutation = useMutation({
+    mutationFn: async (id: number) => {
+      const res = await apiRequest("POST", "/api/cash/void", { id });
+      return res.json() as Promise<{
+        voidedId: number;
+        voidedAmount: number;
+      }>;
+    },
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({
+        queryKey: ["/api/preview/admin/overview"],
+      });
+      // The attendant's tracker reads /api/cash/mine — refresh so the voided
+      // entry disappears for them on their next poll too.
+      queryClient.invalidateQueries({ queryKey: ["/api/cash/mine"] });
+      // If we just voided the last selected/expanded entry, clear stale state.
+      setSelectedCash((prev) => {
+        const next = { ...prev };
+        delete next[result.voidedId];
+        return next;
+      });
+      setVoidTarget(null);
+      toast({
+        title: "Entry voided",
+        description: `Cash entry removed (${money(result.voidedAmount)}). Totals have been corrected; the record is kept for audit.`,
+      });
+    },
+    onError: (err: Error) => {
+      setVoidTarget(null);
+      toast({
+        title: "Could not void entry",
+        description: err.message,
+        variant: "destructive",
+      });
+    },
+  });
+
   const data = query.data;
 
   // Quick-search across plate / make-model / color for the recent + paid lists.
@@ -255,6 +369,32 @@ export function AdminMobilePreview() {
 
   const money = (n: number) => (showMoney ? currency(n) : "••••");
 
+  // "Recent cash" tab — apply the search + date filters to the 30-day feed.
+  // Search matches plate / vehicle / attendant; date matches the local day
+  // (YYYY-MM-DD) of collectedAt. Both filters AND together.
+  const filteredRecentCash = useMemo(() => {
+    const rows = data?.cash.recent ?? [];
+    const needle = cashSearch.trim().toLowerCase();
+    const localDay = (iso: string) => {
+      const t = new Date(iso);
+      if (Number.isNaN(t.getTime())) return "";
+      // Local YYYY-MM-DD (matches the <input type="date"> value).
+      const y = t.getFullYear();
+      const m = String(t.getMonth() + 1).padStart(2, "0");
+      const d = String(t.getDate()).padStart(2, "0");
+      return `${y}-${m}-${d}`;
+    };
+    return rows.filter((c) => {
+      if (cashDate && localDay(c.collectedAt) !== cashDate) return false;
+      if (!needle) return true;
+      return (
+        c.licensePlate.toLowerCase().includes(needle) ||
+        (c.makeModel ?? "").toLowerCase().includes(needle) ||
+        (c.collectedByName ?? "").toLowerCase().includes(needle)
+      );
+    });
+  }, [data, cashSearch, cashDate]);
+
   return (
     <div
       className="min-h-screen pb-24"
@@ -280,6 +420,17 @@ export function AdminMobilePreview() {
             </div>
           </div>
           <div className="flex items-center gap-3 text-white/90">
+            {isAdmin && (
+              <button
+                type="button"
+                onClick={() => setViewMenuOpen(true)}
+                aria-label="Switch view"
+                className="flex h-9 w-9 items-center justify-center rounded-full bg-white/10 active:bg-white/20"
+                data-testid="button-admin-switch-view"
+              >
+                <Repeat2 className="h-[18px] w-[18px]" />
+              </button>
+            )}
             <button
               type="button"
               onClick={() => query.refetch()}
@@ -557,64 +708,303 @@ export function AdminMobilePreview() {
               </div>
             </div>
 
-            {/* Per-attendant holdings */}
+            {/* Per-attendant holdings — tap a row to review & verify their
+                unverified cash entries (per-entry checkboxes + approve). */}
             {data && data.cash.holders.length > 0 && (
               <div className="mt-4 border-t pt-3" style={{ borderColor: ENF.line }}>
-                <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide" style={{ color: ENF.ink3 }}>
-                  Held by
+                <div className="mb-2 flex items-center justify-between">
+                  <span className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: ENF.ink3 }}>
+                    Held by · tap to verify
+                  </span>
                 </div>
                 <div className="space-y-2">
-                  {data.cash.holders.map((h) => (
-                    <div key={h.id} className="flex items-center justify-between" data-testid={`cash-holder-${h.id}`}>
-                      <span className="flex items-center gap-2 text-[13px] font-medium" style={{ color: ENF.ink }}>
-                        <Banknote className="h-4 w-4" style={{ color: ENF.amber }} />
-                        {h.name}
-                        <span className="text-[11px]" style={{ color: ENF.ink3 }}>· {h.count}</span>
-                      </span>
-                      <span className="text-[13px] font-bold" style={{ color: ENF.amber }}>{money(h.owed)}</span>
-                    </div>
-                  ))}
+                  {data.cash.holders.map((h) => {
+                    const open = expandedHolder === h.id;
+                    const entries = h.entries ?? [];
+                    const selectedIds = entries
+                      .filter((e) => selectedCash[e.id])
+                      .map((e) => e.id);
+                    const selTotal = entries
+                      .filter((e) => selectedCash[e.id])
+                      .reduce((s, e) => s + e.amount, 0);
+                    const allSelected =
+                      entries.length > 0 && selectedIds.length === entries.length;
+                    const toggleEntry = (id: number) =>
+                      setSelectedCash((prev) => ({ ...prev, [id]: !prev[id] }));
+                    const toggleAll = () =>
+                      setSelectedCash((prev) => {
+                        const next = { ...prev };
+                        const turnOn = !allSelected;
+                        for (const e of entries) next[e.id] = turnOn;
+                        return next;
+                      });
+                    return (
+                      <div
+                        key={h.id}
+                        className="overflow-hidden rounded-xl border"
+                        style={{ borderColor: open ? ENF.amber : ENF.line }}
+                        data-testid={`cash-holder-${h.id}`}
+                      >
+                        {/* Header row (tap to expand) */}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setExpandedHolder(open ? null : h.id);
+                          }}
+                          className="flex w-full items-center justify-between px-3 py-2.5"
+                          style={{ background: open ? ENF.amberSoft : "#fff" }}
+                          data-testid={`cash-holder-toggle-${h.id}`}
+                        >
+                          <span className="flex items-center gap-2 text-[13px] font-medium" style={{ color: ENF.ink }}>
+                            <Banknote className="h-4 w-4" style={{ color: ENF.amber }} />
+                            {h.name}
+                            <span className="text-[11px]" style={{ color: ENF.ink3 }}>
+                              · {h.count} {h.count === 1 ? "entry" : "entries"}
+                            </span>
+                          </span>
+                          <span className="flex items-center gap-1.5">
+                            <span className="text-[13px] font-bold" style={{ color: ENF.amber }}>{money(h.owed)}</span>
+                            <ChevronRight
+                              className="h-4 w-4 transition-transform"
+                              style={{ color: ENF.ink3, transform: open ? "rotate(90deg)" : "none" }}
+                            />
+                          </span>
+                        </button>
+
+                        {/* Expanded: per-entry checkboxes + verify action */}
+                        {open && (
+                          <div className="border-t" style={{ borderColor: ENF.line }}>
+                            <button
+                              type="button"
+                              onClick={toggleAll}
+                              className="flex w-full items-center justify-between px-3 py-2 text-[11px] font-semibold uppercase tracking-wide"
+                              style={{ color: ENF.ink2, background: "#fafafa" }}
+                              data-testid={`cash-select-all-${h.id}`}
+                            >
+                              <span>{allSelected ? "Deselect all" : "Select all"}</span>
+                              <span style={{ color: ENF.ink3 }}>
+                                {selectedIds.length}/{entries.length} selected
+                              </span>
+                            </button>
+                            <div className="max-h-[320px] overflow-y-auto overscroll-contain" data-testid={`cash-entries-${h.id}`}>
+                              {entries.map((e, i) => {
+                                const checked = !!selectedCash[e.id];
+                                return (
+                                  <div
+                                    key={e.id}
+                                    className="flex w-full items-center gap-2.5 px-3 py-2.5 text-left"
+                                    style={{ borderTop: i === 0 ? "none" : `1px solid ${ENF.line}` }}
+                                    data-testid={`cash-entry-${e.id}`}
+                                  >
+                                    <button
+                                      type="button"
+                                      onClick={() => toggleEntry(e.id)}
+                                      className="flex min-w-0 flex-1 items-center gap-2.5 text-left"
+                                      data-testid={`cash-entry-toggle-${e.id}`}
+                                    >
+                                      <span
+                                        className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md border"
+                                        style={{
+                                          borderColor: checked ? ENF.green : ENF.line,
+                                          background: checked ? ENF.green : "#fff",
+                                        }}
+                                      >
+                                        {checked && <CheckCircle2 className="h-3.5 w-3.5" style={{ color: "#fff" }} />}
+                                      </span>
+                                      <span className="min-w-0 flex-1">
+                                        <PlateText plate={e.licensePlate} size={13} />
+                                        <span className="mt-0.5 block truncate text-[11px]" style={{ color: ENF.ink3 }}>
+                                          {e.makeModel || "Vehicle"} · {relTime(e.collectedAt)}
+                                        </span>
+                                      </span>
+                                      <span className="shrink-0 text-[13px] font-bold" style={{ color: ENF.ink }}>{money(e.amount)}</span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        setVoidTarget({
+                                          id: e.id,
+                                          licensePlate: e.licensePlate,
+                                          makeModel: e.makeModel || "",
+                                          amount: e.amount,
+                                          collectedByName: h.name,
+                                        })
+                                      }
+                                      aria-label="Delete this cash entry"
+                                      className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border transition-colors"
+                                      style={{ borderColor: ENF.line, color: ENF.red }}
+                                      data-testid={`cash-entry-delete-${e.id}`}
+                                    >
+                                      <Trash2 className="h-3.5 w-3.5" />
+                                    </button>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                            {/* Verify & approve action */}
+                            <div className="border-t p-3" style={{ borderColor: ENF.line }}>
+                              <button
+                                type="button"
+                                disabled={selectedIds.length === 0 || verifyCashMutation.isPending}
+                                onClick={() => verifyCashMutation.mutate(selectedIds)}
+                                className="flex w-full items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-[13px] font-bold text-white transition-opacity"
+                                style={{
+                                  background: ENF.green,
+                                  opacity: selectedIds.length === 0 || verifyCashMutation.isPending ? 0.45 : 1,
+                                }}
+                                data-testid={`cash-verify-${h.id}`}
+                              >
+                                <CheckCircle2 className="h-4 w-4" />
+                                {verifyCashMutation.isPending
+                                  ? "Verifying…"
+                                  : selectedIds.length === 0
+                                    ? "Select entries to verify"
+                                    : `Verify & approve ${selectedIds.length} · ${money(selTotal)}`}
+                              </button>
+                              <p className="mt-2 text-center text-[10.5px]" style={{ color: ENF.ink3 }}>
+                                Approving collects this cash and resets {h.name}'s tracker.
+                              </p>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             )}
 
-            {/* Recent cash entries */}
+            {/* Recent cash — full 30-day history, searchable + date-filterable,
+                in a scrollable table. Shows every manual cash payment. */}
             {data && data.cash.recent.length > 0 && (
-              <div className="mt-4 border-t pt-3" style={{ borderColor: ENF.line }}>
-                <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide" style={{ color: ENF.ink3 }}>
-                  Recent cash
+              <div className="mt-4 border-t pt-3" style={{ borderColor: ENF.line }} data-testid="section-recent-cash">
+                <div className="mb-2 flex items-center justify-between">
+                  <span className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: ENF.ink3 }}>
+                    Recent cash · last 30 days
+                  </span>
+                  <span className="text-[11px] font-semibold" style={{ color: ENF.ink3 }}>
+                    {filteredRecentCash.length} of {data.cash.recent.length}
+                  </span>
                 </div>
-                <div className="space-y-2.5">
-                  {data.cash.recent.map((c) => (
-                    <div key={c.id} className="flex items-center justify-between gap-2" data-testid={`cash-recent-${c.id}`}>
-                      <div className="min-w-0">
-                        <PlateText plate={c.licensePlate} size={14} />
-                        <div className="mt-0.5 truncate text-[11px]" style={{ color: ENF.ink3 }}>
-                          {c.collectedByName} · {relTime(c.collectedAt)}
-                        </div>
+
+                {/* Search + date filter controls */}
+                <div className="mb-2.5 flex items-center gap-2">
+                  <div className="relative flex-1">
+                    <SearchIcon className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2" style={{ color: ENF.ink3 }} />
+                    <input
+                      type="text"
+                      inputMode="search"
+                      value={cashSearch}
+                      onChange={(e) => setCashSearch(e.target.value)}
+                      placeholder="Search plate, vehicle, or staff"
+                      className="w-full rounded-lg border bg-white py-2 pl-8 pr-7 text-[12.5px] outline-none"
+                      style={{ borderColor: ENF.line, color: ENF.ink }}
+                      data-testid="recent-cash-search"
+                    />
+                    {cashSearch && (
+                      <button
+                        type="button"
+                        onClick={() => setCashSearch("")}
+                        aria-label="Clear search"
+                        className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5"
+                        style={{ color: ENF.ink3 }}
+                        data-testid="recent-cash-search-clear"
+                      >
+                        <XIcon className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                  </div>
+                  <input
+                    type="date"
+                    value={cashDate}
+                    onChange={(e) => setCashDate(e.target.value)}
+                    className="rounded-lg border bg-white px-2 py-2 text-[12px] outline-none"
+                    style={{ borderColor: cashDate ? ENF.amber : ENF.line, color: ENF.ink }}
+                    data-testid="recent-cash-date"
+                  />
+                  {cashDate && (
+                    <button
+                      type="button"
+                      onClick={() => setCashDate("")}
+                      aria-label="Clear date"
+                      className="shrink-0 rounded-lg border px-2 py-2 text-[11px] font-semibold"
+                      style={{ borderColor: ENF.line, color: ENF.ink2 }}
+                      data-testid="recent-cash-date-clear"
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+
+                {/* Scrollable table */}
+                <div
+                  className="overflow-hidden rounded-xl border"
+                  style={{ borderColor: ENF.line }}
+                >
+                  <div
+                    className="max-h-[320px] overflow-y-auto overscroll-contain"
+                    data-testid="recent-cash-scroll"
+                  >
+                    {filteredRecentCash.length === 0 ? (
+                      <div className="px-3 py-6 text-center text-[12px]" style={{ color: ENF.ink3 }} data-testid="recent-cash-no-match">
+                        No cash payments match your filters.
                       </div>
-                      <div className="flex shrink-0 items-center gap-2">
-                        <span className="text-[13px] font-bold" style={{ color: ENF.ink }}>{money(c.amount)}</span>
-                        <span
-                          className="rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide"
-                          style={
-                            c.reconciled
-                              ? { background: ENF.greenSoft, color: ENF.green }
-                              : { background: ENF.amberSoft, color: ENF.amber }
-                          }
+                    ) : (
+                      filteredRecentCash.map((c, i) => (
+                        <div
+                          key={c.id}
+                          className="flex items-center justify-between gap-2 px-3 py-2.5"
+                          style={{ borderTop: i === 0 ? "none" : `1px solid ${ENF.line}`, background: "#fff" }}
+                          data-testid={`cash-recent-${c.id}`}
                         >
-                          {c.reconciled ? "Banked" : "Held"}
-                        </span>
-                      </div>
-                    </div>
-                  ))}
+                          <div className="min-w-0">
+                            <PlateText plate={c.licensePlate} size={14} />
+                            <div className="mt-0.5 truncate text-[11px]" style={{ color: ENF.ink3 }}>
+                              {(c.makeModel || "Vehicle")} · {c.collectedByName} · {relTime(c.collectedAt)}
+                            </div>
+                          </div>
+                          <div className="flex shrink-0 items-center gap-2">
+                            <span className="text-[13px] font-bold" style={{ color: ENF.ink }}>{money(c.amount)}</span>
+                            <span
+                              className="rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide"
+                              style={
+                                c.reconciled
+                                  ? { background: ENF.greenSoft, color: ENF.green }
+                                  : { background: ENF.amberSoft, color: ENF.amber }
+                              }
+                            >
+                              {c.reconciled ? "Banked" : "Held"}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setVoidTarget({
+                                  id: c.id,
+                                  licensePlate: c.licensePlate,
+                                  makeModel: c.makeModel || "",
+                                  amount: c.amount,
+                                  collectedByName: c.collectedByName,
+                                })
+                              }
+                              aria-label="Delete this cash entry"
+                              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border transition-colors"
+                              style={{ borderColor: ENF.line, color: ENF.red }}
+                              data-testid={`cash-recent-delete-${c.id}`}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
                 </div>
               </div>
             )}
 
             {data && data.cash.recent.length === 0 && (
               <div className="mt-3 border-t pt-3 text-center text-[12px]" style={{ borderColor: ENF.line, color: ENF.ink3 }} data-testid="cash-empty">
-                No field cash logged yet.
+                No field cash logged in the last 30 days.
               </div>
             )}
           </div>
@@ -1029,6 +1419,138 @@ export function AdminMobilePreview() {
           );
         })}
       </nav>
+
+      {/* ===== ADMIN VIEW SWITCHER (bottom sheet) ===== */}
+      {viewMenuOpen && (
+        <div
+          className="fixed inset-0 z-30 flex items-end"
+          style={{ background: "rgba(13,27,42,.45)" }}
+          onClick={() => setViewMenuOpen(false)}
+          data-testid="admin-view-menu-overlay"
+        >
+          <div
+            className="w-full rounded-t-3xl bg-white p-5 pb-8"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mx-auto mb-4 h-1 w-10 rounded-full" style={{ background: ENF.line }} />
+            <div className="text-[16px] font-bold" style={{ color: ENF.ink }}>
+              Switch view
+            </div>
+            <div className="text-[13px]" style={{ color: ENF.ink2 }}>
+              Admin · jump to another surface
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setViewMenuOpen(false);
+                window.location.hash = "#/preview/enforcer-mobile";
+              }}
+              className="mt-4 flex w-full items-center justify-between rounded-[0.875rem] px-4 py-3.5 text-[15px] font-bold"
+              style={{ background: ENF.fieldBg, color: ENF.ink }}
+              data-testid="button-admin-switch-field"
+            >
+              <span className="flex items-center gap-2.5">
+                <Smartphone className="h-[18px] w-[18px]" style={{ color: ENF.ink2 }} />
+                Field / Enforcer view
+              </span>
+              <ChevronRightIcon className="h-4 w-4" style={{ color: ENF.ink3 }} />
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setViewMenuOpen(false);
+                window.location.hash = "#/";
+              }}
+              className="mt-2.5 flex w-full items-center justify-between rounded-[0.875rem] px-4 py-3.5 text-[15px] font-bold"
+              style={{ background: ENF.fieldBg, color: ENF.ink }}
+              data-testid="button-admin-switch-desktop"
+            >
+              <span className="flex items-center gap-2.5">
+                <Monitor className="h-[18px] w-[18px]" style={{ color: ENF.ink2 }} />
+                Desktop dashboard
+              </span>
+              <ChevronRightIcon className="h-4 w-4" style={{ color: ENF.ink3 }} />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ===== DELETE (VOID) CONFIRMATION ===== */}
+      {voidTarget && (
+        <div
+          className="fixed inset-0 z-40 flex items-end"
+          style={{ background: "rgba(13,27,42,.45)" }}
+          onClick={() => {
+            if (!voidCashMutation.isPending) setVoidTarget(null);
+          }}
+          data-testid="cash-void-overlay"
+        >
+          <div
+            className="w-full rounded-t-3xl bg-white p-5 pb-8"
+            onClick={(e) => e.stopPropagation()}
+            data-testid="cash-void-dialog"
+          >
+            <div className="mx-auto mb-4 h-1 w-10 rounded-full" style={{ background: ENF.line }} />
+            <div className="flex items-start gap-3">
+              <span
+                className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl"
+                style={{ background: ENF.redSoft, color: ENF.red }}
+              >
+                <Trash2 className="h-5 w-5" />
+              </span>
+              <div className="min-w-0">
+                <div className="text-[16px] font-bold" style={{ color: ENF.ink }}>
+                  Delete this cash entry?
+                </div>
+                <div className="mt-0.5 text-[13px] leading-snug" style={{ color: ENF.ink2 }}>
+                  This removes it from all totals and the attendant's tracker.
+                  The record is kept for audit and can't be un-deleted here.
+                </div>
+              </div>
+            </div>
+
+            {/* Entry summary */}
+            <div
+              className="mt-4 flex items-center justify-between gap-2 rounded-xl border px-3 py-2.5"
+              style={{ borderColor: ENF.line, background: ENF.fieldBg }}
+            >
+              <div className="min-w-0">
+                <PlateText plate={voidTarget.licensePlate} size={14} />
+                <div className="mt-0.5 truncate text-[11px]" style={{ color: ENF.ink3 }}>
+                  {(voidTarget.makeModel || "Vehicle")} · {voidTarget.collectedByName}
+                </div>
+              </div>
+              <span className="shrink-0 text-[15px] font-bold" style={{ color: ENF.ink }}>
+                {money(voidTarget.amount)}
+              </span>
+            </div>
+
+            <div className="mt-5 flex gap-2.5">
+              <button
+                type="button"
+                disabled={voidCashMutation.isPending}
+                onClick={() => setVoidTarget(null)}
+                className="flex-1 rounded-xl border px-4 py-3 text-[14px] font-bold"
+                style={{ borderColor: ENF.line, color: ENF.ink, opacity: voidCashMutation.isPending ? 0.5 : 1 }}
+                data-testid="cash-void-cancel"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={voidCashMutation.isPending}
+                onClick={() => voidCashMutation.mutate(voidTarget.id)}
+                className="flex flex-1 items-center justify-center gap-2 rounded-xl px-4 py-3 text-[14px] font-bold text-white transition-opacity"
+                style={{ background: ENF.red, opacity: voidCashMutation.isPending ? 0.6 : 1 }}
+                data-testid="cash-void-confirm"
+              >
+                <Trash2 className="h-4 w-4" />
+                {voidCashMutation.isPending ? "Deleting…" : "Delete entry"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

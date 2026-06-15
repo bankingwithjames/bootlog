@@ -179,6 +179,9 @@ function rowToCashCollection(row: any): CashCollection {
     reconciled: Boolean(row.reconciled),
     reconciledAt: row.reconciled_at ?? null,
     reconciledByName: row.reconciled_by_name ?? null,
+    voided: Boolean(row.voided),
+    voidedAt: row.voided_at ?? null,
+    voidedByName: row.voided_by_name ?? null,
   } as CashCollection;
 }
 
@@ -231,6 +234,8 @@ export interface IStorage {
   countActiveAdmins(): Promise<number>;
   // Boots
   getBoots(): Promise<Boot[]>;
+  // getBoots without the heavy photos column — for dashboards/rollups.
+  getBootsForOverview(): Promise<Boot[]>;
   createBoot(boot: InsertBoot, actor?: Actor): Promise<Boot>;
   updateBootStatus(
     id: number,
@@ -298,8 +303,22 @@ export interface IStorage {
   getCashSummaryForCollector(collectorId: number): Promise<CashSummary>;
   // Org-wide cash ledger (admin reconciliation view), newest first.
   getAllCashCollections(): Promise<CashCollection[]>;
+  // Admin verifies + collects cash: flip the given entries to reconciled,
+  // stamping who approved and when. Only entries that are currently
+  // unreconciled are updated. Returns the updated rows.
+  reconcileCashCollections(
+    ids: number[],
+    reconciledByName: string,
+  ): Promise<CashCollection[]>;
+  // Admin soft-deletes (voids) a single cash entry. The row is kept for audit
+  // but excluded from all totals/lists. Returns the updated row or null.
+  voidCashCollection(
+    id: number,
+    voidedByName: string,
+  ): Promise<CashCollection | null>;
   // Boot requests
   getBootRequests(): Promise<BootRequest[]>;
+  getBootRequestsForOverview(): Promise<BootRequest[]>;
   getBootRequest(id: number): Promise<BootRequest | undefined>;
   createBootRequest(
     input: InsertBootRequest,
@@ -467,6 +486,25 @@ export class DatabaseStorage implements IStorage {
     return (rows ?? []).map(rowToRequest);
   }
 
+  // Overview never needs boot-request photos. The photos column stores inline
+  // base64 images (multiple MB per row), so selecting it for every request
+  // blows the Postgres statement timeout and the published-sandbox proxy
+  // budget. Skip it here; returned requests carry photos: [].
+  async getBootRequestsForOverview(): Promise<BootRequest[]> {
+    const cols =
+      "id, license_plate, make_model, color, suggested_fee, note, status, " +
+      "requested_by_id, requested_by_name, requested_at, resolved_by_id, " +
+      "resolved_by_name, resolved_at, boot_id";
+    const rows = check(
+      await supabase
+        .from("boot_requests")
+        .select(cols)
+        .order("requested_at", { ascending: false }),
+      "getBootRequestsForOverview",
+    );
+    return (rows ?? []).map(rowToRequest);
+  }
+
   async getBootRequest(id: number): Promise<BootRequest | undefined> {
     const rows = check(
       await supabase.from("boot_requests").select("*").eq("id", id).limit(1),
@@ -573,6 +611,27 @@ export class DatabaseStorage implements IStorage {
         .select("*")
         .order("booted_at", { ascending: false }),
       "getBoots",
+    );
+    return (rows ?? []).map(rowToBoot);
+  }
+
+  // Like getBoots but EXCLUDES the heavy `photos` column (base64 image blobs).
+  // Dashboards/rollups never need photos, and fetching them for every boot
+  // bloats the payload enough to blow the published-sandbox proxy's request
+  // budget (→ empty-body 503). Returned boots carry photos: [].
+  async getBootsForOverview(): Promise<Boot[]> {
+    const cols =
+      "id, license_plate, make_model, color, booted_at, boot_fee, " +
+      "amount_collected, status, resolved_at, latitude, longitude, " +
+      "created_by_id, created_by_name, last_action_by_id, " +
+      "last_action_by_name, fee_paid, location_id, enforcement_stage, " +
+      "evidence_labels";
+    const rows = check(
+      await supabase
+        .from("boots")
+        .select(cols)
+        .order("booted_at", { ascending: false }),
+      "getBootsForOverview",
     );
     return (rows ?? []).map(rowToBoot);
   }
@@ -938,12 +997,65 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getAllCashCollections(): Promise<CashCollection[]> {
+    // Exclude voided (soft-deleted) rows so they drop out of every total,
+    // holder tracker, and recent list. The rows remain in the table as an
+    // audit trail. `.neq("voided", true)` also matches NULL voided values for
+    // legacy rows written before the column existed.
     const rows = check(
       await supabase
         .from("cash_collections")
         .select("*")
+        .neq("voided", true)
         .order("collected_at", { ascending: false }),
       "getAllCashCollections",
+    );
+    return (rows ?? []).map(rowToCashCollection);
+  }
+
+  // Void (soft delete) a single cash entry. Admin-only at the route layer.
+  // Idempotent: only flips rows that aren't already voided, and stamps who
+  // voided it + when for the audit trail. Returns the updated row, or null if
+  // it was already voided / not found.
+  async voidCashCollection(
+    id: number,
+    voidedByName: string,
+  ): Promise<CashCollection | null> {
+    const rows = check(
+      await supabase
+        .from("cash_collections")
+        .update({
+          voided: true,
+          voided_at: new Date().toISOString(),
+          voided_by_name: voidedByName,
+        })
+        .eq("id", id)
+        .neq("voided", true)
+        .select("*"),
+      "voidCashCollection",
+    );
+    const row = (rows ?? [])[0];
+    return row ? rowToCashCollection(row) : null;
+  }
+
+  async reconcileCashCollections(
+    ids: number[],
+    reconciledByName: string,
+  ): Promise<CashCollection[]> {
+    if (!ids || ids.length === 0) return [];
+    // Only flip entries that are still unreconciled (idempotent + avoids
+    // overwriting an earlier approver's stamp if two admins act at once).
+    const rows = check(
+      await supabase
+        .from("cash_collections")
+        .update({
+          reconciled: true,
+          reconciled_at: new Date().toISOString(),
+          reconciled_by_name: reconciledByName,
+        })
+        .in("id", ids)
+        .eq("reconciled", false)
+        .select("*"),
+      "reconcileCashCollections",
     );
     return (rows ?? []).map(rowToCashCollection);
   }
@@ -956,6 +1068,7 @@ export class DatabaseStorage implements IStorage {
         .from("cash_collections")
         .select("*")
         .eq("collected_by_id", collectorId)
+        .neq("voided", true)
         .order("collected_at", { ascending: false }),
       "getCashForCollector",
     );
@@ -978,11 +1091,32 @@ export class DatabaseStorage implements IStorage {
         owedCount += 1;
       }
     }
+    // The attendant's cash tracker must show EVERY unverified (owed) entry so
+    // they can reconcile the full count with admin — never truncate these.
+    // We return all unreconciled entries (newest first) plus a small tail of
+    // the most recent reconciled ones for context. The list naturally resets
+    // as admin verifies entries (they drop out of the unreconciled set).
+    const unreconciled = all.filter((c) => !c.reconciled);
+    const reconciled = all.filter((c) => c.reconciled);
+    const reconciledTail = reconciled.slice(0, 10);
+    // Find the most recent reconciliation stamp so the attendant can be shown a
+    // "Cash verified by <admin>" confirmation when their count is reset.
+    let lastReconciledAt: string | null = null;
+    let lastReconciledByName: string | null = null;
+    for (const c of reconciled) {
+      const at = c.reconciledAt || null;
+      if (at && (!lastReconciledAt || at > lastReconciledAt)) {
+        lastReconciledAt = at;
+        lastReconciledByName = c.reconciledByName || null;
+      }
+    }
     return {
       owedTotal: Math.round(owedTotal * 100) / 100,
       reconciledTotal: Math.round(reconciledTotal * 100) / 100,
       owedCount,
-      recent: all.slice(0, 20),
+      recent: [...unreconciled, ...reconciledTail],
+      lastReconciledAt,
+      lastReconciledByName,
     };
   }
 

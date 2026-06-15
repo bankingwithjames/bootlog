@@ -8,6 +8,7 @@ import {
   ListChecks,
   Clock,
   Plus,
+  Repeat2,
 } from "lucide-react";
 import logoMark from "@assets/logo-mark.png";
 import type { EnforcementStage } from "@shared/schema";
@@ -140,6 +141,7 @@ export function EnforcerShell({
   onOpenScan,
   onOpenMenu,
   onOpenNotifications,
+  onSwitchView,
   children,
 }: {
   userName: string;
@@ -152,6 +154,8 @@ export function EnforcerShell({
   onOpenScan: () => void;
   onOpenMenu: () => void;
   onOpenNotifications: () => void;
+  // Admin-only: when provided, renders a header control to switch surfaces.
+  onSwitchView?: () => void;
   children: ReactNode;
 }) {
   // The bottom nav only highlights the five primary tabs; sub-views (case,
@@ -196,6 +200,17 @@ export function EnforcerShell({
             </div>
           </div>
           <div className="flex items-center gap-[15px] text-white/90">
+            {onSwitchView && (
+              <button
+                type="button"
+                className="flex h-9 w-9 items-center justify-center rounded-full bg-white/10 active:bg-white/20"
+                onClick={onSwitchView}
+                aria-label="Switch view"
+                data-testid="button-enforcer-switch-view"
+              >
+                <Repeat2 className="h-[18px] w-[18px]" />
+              </button>
+            )}
             <button
               type="button"
               className="relative flex"

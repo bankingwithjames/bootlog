@@ -102,6 +102,11 @@ type PaidCarLite = {
   licensePlate: string;
   paidAt: string;
   source?: "stripe" | "manual";
+  // How the payment was taken in the field ("app" for PocketVendor charges).
+  method?: "cash" | "card" | "app" | null;
+  // Parking-lot address for app charges (the charge description). Shown in the
+  // meta line when there's no make/model to display.
+  lotAddress?: string | null;
 };
 type ChipFilter = "all" | "unpaid" | "booted" | "paid";
 
@@ -589,7 +594,9 @@ function InventoryRow({
 // are payment records, not booted vehicles with quick actions.
 function PaidCarRow({ car }: { car: PaidCarLite }) {
   const isManual = car.source === "manual";
-  const meta = [car.color].filter(Boolean).join(" · ");
+  // App charges carry no make/model/color but do carry the lot address; show it
+  // so the attendant can see where the payment was taken.
+  const meta = [car.color, car.lotAddress].filter(Boolean).join(" · ");
   let time = "";
   try {
     time = car.paidAt ? format(parseISO(car.paidAt), "h:mm a") : "";

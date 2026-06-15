@@ -485,6 +485,15 @@ export const cashCollections = sqliteTable("cash_collections", {
     .default(false),
   reconciledAt: text("reconciled_at"),
   reconciledByName: text("reconciled_by_name"),
+  // Soft delete (void): admins can void an erroneous cash entry. Voided rows
+  // are kept in the table as an audit trail but excluded from every total,
+  // holder tracker, recent list, and the attendant's own view — so balances
+  // self-correct without destroying the record of what happened.
+  voided: integer("voided", { mode: "boolean" })
+    .notNull()
+    .default(false),
+  voidedAt: text("voided_at"),
+  voidedByName: text("voided_by_name"),
 });
 
 export type CashCollection = typeof cashCollections.$inferSelect;
@@ -500,6 +509,11 @@ export type CashSummary = {
   owedCount: number;
   // Most recent cash entries (newest first), for the running list.
   recent: CashCollection[];
+  // Stamp of the most recently reconciled entry, so the attendant can be shown
+  // a "Cash verified by <admin> — count reset" confirmation. Null until the
+  // admin has verified at least one of this attendant's entries.
+  lastReconciledAt: string | null;
+  lastReconciledByName: string | null;
 };
 
 // ---------------------------------------------------------------------------

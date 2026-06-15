@@ -23,6 +23,8 @@ import {
   Plus,
   Car,
   LogOut,
+  LayoutDashboard,
+  Monitor,
 } from "lucide-react";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
@@ -130,7 +132,7 @@ function caseHasEvidence(c: EnfCase): boolean {
 }
 
 export function EnforcerPreview() {
-  const { user, logout } = useAuth();
+  const { user, logout, isAdmin } = useAuth();
   const { toast } = useToast();
   const tzMin = new Date().getTimezoneOffset();
   const date = todayKey(tzMin);
@@ -380,6 +382,7 @@ export function EnforcerPreview() {
         onOpenScan={() => setView("addboot")}
         onOpenMenu={() => setMenuOpen(true)}
         onOpenNotifications={() => setView("queue")}
+        onSwitchView={isAdmin ? () => setMenuOpen(true) : undefined}
       >
         {!stripeOk && <StaleStripeBanner />}
 
@@ -502,10 +505,19 @@ export function EnforcerPreview() {
       {menuOpen && (
         <ProfileMenu
           userName={userName}
+          isAdmin={isAdmin}
           onClose={() => setMenuOpen(false)}
           onGoProfile={() => {
             setMenuOpen(false);
             setView("profile");
+          }}
+          onSwitchManagement={() => {
+            setMenuOpen(false);
+            window.location.hash = "#/preview/admin-mobile";
+          }}
+          onSwitchDesktop={() => {
+            setMenuOpen(false);
+            window.location.hash = "#/";
           }}
           onLogout={() => {
             setMenuOpen(false);
@@ -2676,13 +2688,19 @@ function HistoryPage({
 // ---------------------------------------------------------------------------
 function ProfileMenu({
   userName,
+  isAdmin,
   onClose,
   onGoProfile,
+  onSwitchManagement,
+  onSwitchDesktop,
   onLogout,
 }: {
   userName: string;
+  isAdmin?: boolean;
   onClose: () => void;
   onGoProfile: () => void;
+  onSwitchManagement: () => void;
+  onSwitchDesktop: () => void;
   onLogout: () => void;
 }) {
   return (
@@ -2713,6 +2731,43 @@ function ProfileMenu({
           Profile & settings
           <ChevronRight className="h-4 w-4" style={{ color: ENF.ink3 }} />
         </button>
+        {isAdmin && (
+          <>
+            <div
+              className="mt-4 mb-1.5 px-1 text-[11px] font-bold uppercase tracking-[0.06em]"
+              style={{ color: ENF.ink3 }}
+              data-testid="menu-switch-heading"
+            >
+              Switch view
+            </div>
+            <button
+              type="button"
+              onClick={onSwitchManagement}
+              className="flex w-full items-center justify-between rounded-[0.875rem] px-4 py-3.5 text-[15px] font-bold"
+              style={{ background: ENF.fieldBg, color: ENF.ink }}
+              data-testid="button-menu-switch-management"
+            >
+              <span className="flex items-center gap-2.5">
+                <LayoutDashboard className="h-[18px] w-[18px]" style={{ color: ENF.ink2 }} />
+                Management view
+              </span>
+              <ChevronRight className="h-4 w-4" style={{ color: ENF.ink3 }} />
+            </button>
+            <button
+              type="button"
+              onClick={onSwitchDesktop}
+              className="mt-2.5 flex w-full items-center justify-between rounded-[0.875rem] px-4 py-3.5 text-[15px] font-bold"
+              style={{ background: ENF.fieldBg, color: ENF.ink }}
+              data-testid="button-menu-switch-desktop"
+            >
+              <span className="flex items-center gap-2.5">
+                <Monitor className="h-[18px] w-[18px]" style={{ color: ENF.ink2 }} />
+                Desktop dashboard
+              </span>
+              <ChevronRight className="h-4 w-4" style={{ color: ENF.ink3 }} />
+            </button>
+          </>
+        )}
         <button
           type="button"
           onClick={onLogout}

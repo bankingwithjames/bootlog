@@ -145,6 +145,7 @@ async function allowedLocationIds(req: Request): Promise<number[] | null> {
 
 // Map a stored snapshot row to the PaidCar shape the frontend expects.
 function snapshotToCar(s: PaidSnapshot): PaidCar {
+  const method = (s.method as "cash" | "card" | "app" | null) ?? null;
   return {
     id: s.sessionId,
     makeModel: s.makeModel,
@@ -153,8 +154,11 @@ function snapshotToCar(s: PaidSnapshot): PaidCar {
     paidAt: s.paidAt,
     source: s.source === "manual" ? "manual" : "stripe",
     amount: s.amount ?? null,
-    method: (s.method as "cash" | "card" | "app" | null) ?? null,
+    method,
     space: s.space ?? null,
+    // For persisted app charges the parking-lot address was stored in `space`;
+    // surface it back as lotAddress so the UI meta line still shows the lot.
+    lotAddress: method === "app" ? s.space ?? null : null,
   };
 }
 
@@ -174,6 +178,51 @@ async function mergeManual(day: string, cars: PaidCar[]): Promise<PaidCar[]> {
   const merged = [...manualCars, ...deduped];
   merged.sort((a, b) => b.paidAt.localeCompare(a.paidAt));
   return merged;
+}
+
+// How long the live Stripe pass may take before we fall back to the day's
+// stored snapshot. Kept comfortably under the published-sandbox proxy's request
+// budget so the response returns (with cached data) instead of the proxy
+// emitting an empty-body 503.
+const STRIPE_LIVE_BUDGET_MS = 2500;
+
+// Short-TTL in-memory cache for the admin overview response. The overview runs
+// 6 parallel Supabase reads plus a live Stripe pass; on the published-sandbox
+// proxy (~4-5s request budget) that occasionally exceeds the budget and the
+// proxy returns an empty-body 503. The admin dashboard polls this endpoint, so
+// caching the assembled payload for a few seconds lets repeated requests return
+// instantly (well under the budget) while keeping data effectively live.
+const OVERVIEW_CACHE_TTL_MS = 8000;
+// How long a cached payload may still be served as a fast fallback while a fresh
+// one is rebuilt in the background. Bridges the cold request after the TTL
+// lapses so it never blocks long enough for the proxy to emit a 503.
+const OVERVIEW_STALE_MAX_MS = 60000;
+const overviewCache = new Map<string, { at: number; payload: unknown }>();
+// Tracks an in-flight rebuild per cache key so concurrent requests don't all
+// run the heavy assembly at once.
+const overviewRefreshing = new Set<string>();
+
+// Race a promise against a timeout. Used to bound slow live-Stripe lookups so a
+// heavy endpoint degrades gracefully (fall back to snapshot / stripeOk=false)
+// within the published-sandbox proxy's request budget instead of hanging until
+// the proxy emits a 503 with an empty body.
+function withTimeout<T>(p: Promise<T>, ms: number, label = "op"): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`${label} timed out after ${ms}ms`)),
+      ms,
+    );
+    p.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
 }
 
 // Resolve paid cars for a given local day.
@@ -202,13 +251,44 @@ async function resolvePaidCars(
 
   // Today, future, or a past day we haven't captured yet: fetch live.
   const [start, end] = dayRange(date, tz);
-  const stripeCars = await fetchPaidCars(start, end);
+
+  // Bound the live Stripe pass. The published pplx.app sandbox routes backend
+  // requests through a proxy with a short request budget; as the day fills up
+  // with charges, the live fetch (pagination + per-customer name lookups) can
+  // exceed it and the proxy returns an empty-body 503. If the live fetch is too
+  // slow OR errors, fall back to the most recent stored snapshot for the day so
+  // the user still sees data instead of an error.
+  let stripeCars: PaidCar[];
+  try {
+    stripeCars = await withTimeout(
+      fetchPaidCars(start, end),
+      STRIPE_LIVE_BUDGET_MS,
+      "resolvePaidCars stripe",
+    );
+  } catch (err) {
+    // Live fetch failed/timed out. Serve whatever we last snapshotted for the
+    // day (plus manual rows), flagged as "stored" so callers know it may be a
+    // moment stale. If there's no snapshot yet, re-throw so the caller can
+    // surface the error (e.g. stripeOk=false on the dashboard).
+    const hasSnap = await storage.hasSnapshotForDay(date);
+    if (hasSnap) {
+      const rows = await storage.getSnapshotsForDay(date);
+      const cars = rows.map(snapshotToCar);
+      cars.sort((a, b) => b.paidAt.localeCompare(a.paidAt));
+      return { cars, source: "stored" };
+    }
+    throw err;
+  }
   stripeCars.forEach((c) => (c.source = "stripe"));
 
   // Persist the Stripe rows for this day (skip empty future days). This
-  // preserves any manual rows already stored for the day.
+  // preserves any manual rows already stored for the day. For the live (today)
+  // path we DON'T await the write — it's a best-effort cache refresh and must
+  // not delay the response (another slow Supabase round-trip would risk the
+  // same proxy timeout). For past-day backfills we await so the snapshot is
+  // guaranteed before we return.
   if (stripeCars.length > 0 || isPast) {
-    await storage.replaceSnapshotsForDay(
+    const writePromise = storage.replaceSnapshotsForDay(
       date,
       stripeCars.map((c) => ({
         day: date,
@@ -219,8 +299,21 @@ async function resolvePaidCars(
         color: c.color,
         paidAt: c.paidAt,
         source: "stripe",
+        // App/charge rows carry payment details that Checkout-Session rows
+        // don't. Persist them so past-day snapshots keep the amount, the "app"
+        // method, and the parking-lot address (stored in `space`, which is the
+        // "where" column and otherwise null for Stripe rows).
+        amount: c.amount ?? null,
+        method: c.method ?? null,
+        space: c.lotAddress ?? c.space ?? null,
       })),
     );
+    if (isPast) {
+      await writePromise;
+    } else {
+      // Fire-and-forget for the live path; swallow errors (best-effort cache).
+      void writePromise.catch(() => {});
+    }
   }
 
   // Merge in manual entries for the day (live today + uncaptured past).
@@ -1173,6 +1266,80 @@ export async function registerRoutes(
     res.json(summary);
   });
 
+  // POST /api/cash/verify  (admin only)
+  // The admin reviews an attendant's unverified cash, then verifies + collects
+  // the selected entries. Flipping reconciled=true removes them from the
+  // attendant's owed tracker (resetting their running count) and stamps who
+  // approved. Body: { ids: number[] }. Returns the reconciled rows + a fresh
+  // summary for the affected collector so the UI can update immediately.
+  app.post("/api/cash/verify", requireRole("admin"), async (req, res) => {
+    const raw = (req.body?.ids ?? []) as unknown[];
+    const ids = Array.from(
+      new Set(
+        raw
+          .map((v) => Number(v))
+          .filter((n) => Number.isInteger(n) && n > 0),
+      ),
+    );
+    if (ids.length === 0) {
+      return res.status(400).json({ message: "No cash entries selected." });
+    }
+    const adminName = req.user!.name || req.user!.username || "Admin";
+    const reconciled = await storage.reconcileCashCollections(ids, adminName);
+    // The dashboard overview is cached; clear it so the verified amounts drop
+    // out of "Cash owed to bank" on the admin's very next refresh.
+    overviewCache.clear();
+    const collectorId = reconciled[0]?.collectedById;
+    const summary =
+      collectorId != null
+        ? await storage.getCashSummaryForCollector(collectorId)
+        : null;
+    res.json({
+      verifiedCount: reconciled.length,
+      verifiedTotal:
+        Math.round(
+          reconciled.reduce((s, c) => s + (Number(c.amount) || 0), 0) * 100,
+        ) / 100,
+      reconciledByName: adminName,
+      collectorId: collectorId ?? null,
+      summary,
+    });
+  });
+
+  // POST /api/cash/void  (admin only)
+  // Soft-deletes (voids) a single cash entry. The row stays in the ledger as an
+  // audit trail (with who voided it + when), but is excluded from every total,
+  // holder tracker, recent list, and the attendant's own view — so balances
+  // self-correct. Body: { id: number }. Returns the voided row + a fresh
+  // summary for the affected collector so the UI can update immediately.
+  app.post("/api/cash/void", requireRole("admin"), async (req, res) => {
+    const id = Number(req.body?.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({ message: "A valid cash entry id is required." });
+    }
+    const adminName = req.user!.name || req.user!.username || "Admin";
+    const voided = await storage.voidCashCollection(id, adminName);
+    if (!voided) {
+      // Already voided or not found — idempotent no-op from the client's view.
+      return res.status(404).json({ message: "Cash entry not found or already voided." });
+    }
+    // The dashboard overview is cached; clear it so the voided amount drops out
+    // of every total + list on the admin's very next refresh.
+    overviewCache.clear();
+    const collectorId = voided.collectedById;
+    const summary =
+      collectorId != null
+        ? await storage.getCashSummaryForCollector(collectorId)
+        : null;
+    res.json({
+      voidedId: voided.id,
+      voidedAmount: Math.round((Number(voided.amount) || 0) * 100) / 100,
+      voidedByName: adminName,
+      collectorId: collectorId ?? null,
+      summary,
+    });
+  });
+
   // ---- Shifts: the current user's own shift history (timesheet) ----
   // GET /api/shifts/mine -> { shifts: Shift[] } newest first.
   app.get("/api/shifts/mine", requireAuth, async (req, res) => {
@@ -1700,13 +1867,19 @@ function registerEnforcerPreviewRoutes(app: Express) {
     async (req, res) => {
       const tz = Number(req.query.tz ?? 0) || 0;
       const today = todayKey(tz);
+      const cacheKey = `${today}|${tz}`;
 
+      // Heavy assembly: 6 parallel Supabase reads + the live Stripe pass. Wrapped
+      // so it can run inline (cold) or in the background (stale-while-revalidate).
+      const buildOverview = async () => {
       const [boots, users, locations, bootReqs, releaseReqs, cash] =
         await Promise.all([
-          storage.getBoots(),
+          // Overview never needs boot photos; skip the heavy base64 column so
+          // the payload stays small enough for the published-sandbox proxy.
+          storage.getBootsForOverview(),
           storage.getUsers(),
           storage.getLocations(),
-          storage.getBootRequests(),
+          storage.getBootRequestsForOverview(),
           storage.getReleaseRequests(),
           storage.getAllCashCollections(),
         ]);
@@ -1728,6 +1901,10 @@ function registerEnforcerPreviewRoutes(app: Express) {
       }[] = [];
       let stripeOk = true;
       try {
+        // resolvePaidCars already self-bounds the live Stripe pass and falls
+        // back to the stored snapshot on timeout, so this resolves quickly. The
+        // try/catch remains as a final safety net (stripeOk=false) for any
+        // unexpected error so the rest of the dashboard still renders.
         const { cars } = await resolvePaidCars(today, tz);
         paidTodayCount = cars.length;
         paidStripeCount = cars.filter((c) => c.source === "stripe").length;
@@ -1812,9 +1989,25 @@ function registerEnforcerPreviewRoutes(app: Express) {
       // "Cash Payments Tracker" tile in the Today section.
       let cashAllTotal = 0;
       let cashAllCount = 0;
+      // Each holder carries the list of their unverified entries so the admin
+      // dashboard can expand a row and verify individual entries inline
+      // (per-entry checkboxes) without a second round-trip.
+      type HolderEntry = {
+        id: number;
+        licensePlate: string;
+        makeModel: string;
+        amount: number;
+        collectedAt: string;
+      };
       const byCollector = new Map<
         number,
-        { id: number; name: string; owed: number; count: number }
+        {
+          id: number;
+          name: string;
+          owed: number;
+          count: number;
+          entries: HolderEntry[];
+        }
       >();
       for (const c of cash) {
         const amt = Number(c.amount) || 0;
@@ -1834,25 +2027,52 @@ function registerEnforcerPreviewRoutes(app: Express) {
               name: c.collectedByName || "Attendant",
               owed: 0,
               count: 0,
+              entries: [] as HolderEntry[],
             };
           prev.owed += amt;
           prev.count += 1;
           prev.name = c.collectedByName || prev.name;
+          prev.entries.push({
+            id: c.id,
+            licensePlate: c.licensePlate,
+            makeModel: c.makeModel || "",
+            amount: Math.round(amt * 100) / 100,
+            collectedAt: c.collectedAt,
+          });
           byCollector.set(c.collectedById, prev);
         }
       }
       const round2 = (n: number) => Math.round(n * 100) / 100;
       const cashHolders = [...byCollector.values()]
-        .map((h) => ({ ...h, owed: round2(h.owed) }))
+        .map((h) => ({
+          ...h,
+          owed: round2(h.owed),
+          // Newest entry first within each holder.
+          entries: h.entries.sort((a, b) =>
+            (b.collectedAt || "").localeCompare(a.collectedAt || ""),
+          ),
+        }))
         .sort((a, b) => b.owed - a.owed);
-      const recentCash = cash.slice(0, 12).map((c) => ({
-        id: c.id,
-        licensePlate: c.licensePlate,
-        amount: round2(Number(c.amount) || 0),
-        collectedByName: c.collectedByName || "Attendant",
-        collectedAt: c.collectedAt,
-        reconciled: c.reconciled,
-      }));
+      // Recent cash = EVERY manual cash payment from the last 30 days (verified
+      // + unverified), newest first. No row cap — the admin "Recent cash" tab
+      // renders this in a scrollable, searchable, date-filterable table. Bound
+      // by a 30-day window so the payload stays proxy-safe while still giving
+      // the admin a full month of history to search.
+      const recentCutoffMs = Date.now() - 30 * 24 * 60 * 60 * 1000;
+      const recentCash = cash
+        .filter((c) => {
+          const t = Date.parse(c.collectedAt || "");
+          return Number.isNaN(t) ? true : t >= recentCutoffMs;
+        })
+        .map((c) => ({
+          id: c.id,
+          licensePlate: c.licensePlate,
+          makeModel: c.makeModel || "",
+          amount: round2(Number(c.amount) || 0),
+          collectedByName: c.collectedByName || "Attendant",
+          collectedAt: c.collectedAt,
+          reconciled: c.reconciled,
+        }));
 
       // ---- 7-day trend (oldest -> newest) --------------------------------
       const trend: { day: string; booted: number; collected: number; isToday: boolean }[] = [];
@@ -1890,7 +2110,7 @@ function registerEnforcerPreviewRoutes(app: Express) {
           };
         });
 
-      res.json({
+      const payload = {
         date: today,
         stripeOk,
         today: {
@@ -1944,7 +2164,44 @@ function registerEnforcerPreviewRoutes(app: Express) {
             active: l.active,
           })),
         },
-      });
+      };
+      // Only cache healthy responses — never pin a degraded (stripeOk=false)
+      // payload, so a transient Stripe hiccup recovers on the next request.
+      if (stripeOk) {
+        overviewCache.set(cacheKey, { at: Date.now(), payload });
+      }
+      return payload;
+      }; // end buildOverview
+
+      // Kick off a background rebuild (deduped per key) without blocking.
+      const refreshInBackground = () => {
+        if (overviewRefreshing.has(cacheKey)) return;
+        overviewRefreshing.add(cacheKey);
+        buildOverview()
+          .catch(() => {})
+          .finally(() => overviewRefreshing.delete(cacheKey));
+      };
+
+      // Stale-while-revalidate: serve fresh instantly; serve recent-stale
+      // instantly while refreshing in the background; otherwise build inline.
+      const cached = overviewCache.get(cacheKey);
+      const age = cached ? Date.now() - cached.at : Infinity;
+      if (cached && age < OVERVIEW_CACHE_TTL_MS) {
+        return res.json(cached.payload);
+      }
+      if (cached && age < OVERVIEW_STALE_MAX_MS) {
+        refreshInBackground();
+        return res.json(cached.payload);
+      }
+      // Cold path (no usable cache): build synchronously.
+      try {
+        const payload = await buildOverview();
+        res.json(payload);
+      } catch (err) {
+        // Last-resort fallback: serve any cached payload, however old.
+        if (cached) return res.json(cached.payload);
+        throw err;
+      }
     },
   );
 }
